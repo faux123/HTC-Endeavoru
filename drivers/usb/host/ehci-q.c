@@ -289,6 +289,18 @@ __acquires(ehci->lock)
 		urb->actual_length, urb->transfer_buffer_length);
 #endif
 
+#ifdef CONFIG_MACH_ENDEARVORU
+	/* HTC: log for urb trace */
+	if (host_dbg_flag & DBG_EHCI_URB)
+		ehci_info (ehci,
+			"%s %s urb %p ep%d%s status %d len %d/%d\n",
+			__func__, urb->dev->devpath, urb,
+			usb_pipeendpoint (urb->pipe),
+			usb_pipein (urb->pipe) ? "in" : "out",
+			status,
+			urb->actual_length, urb->transfer_buffer_length);
+#endif
+
 	/* complete() can reenter this HCD */
 	usb_hcd_unlink_urb_from_ep(ehci_to_hcd(ehci), urb);
 	spin_unlock (&ehci->lock);
@@ -826,6 +838,7 @@ qh_make (
 				is_input, 0,
 				hb_mult(maxp) * max_packet(maxp)));
 		qh->start = NO_FRAME;
+		qh->stamp = ehci->periodic_stamp;
 
 		if (urb->dev->speed == USB_SPEED_HIGH) {
 			qh->c_usecs = 0;
@@ -996,6 +1009,7 @@ static void qh_link_async (struct ehci_hcd *ehci, struct ehci_qh *qh)
 	qh_get(qh);
 	qh->xacterrs = 0;
 	qh->qh_state = QH_STATE_LINKED;
+	wmb();
 	/* qtd completions reported later by interrupt */
 }
 
@@ -1107,6 +1121,21 @@ submit_async (
 		struct ehci_qtd *qtd;
 		qtd = list_entry(qtd_list->next, struct ehci_qtd, qtd_list);
 		ehci_dbg(ehci,
+			 "%s %s urb %p ep%d%s len %d, qtd %p [qh %p]\n",
+			 __func__, urb->dev->devpath, urb,
+			 epnum & 0x0f, (epnum & USB_DIR_IN) ? "in" : "out",
+			 urb->transfer_buffer_length,
+			 qtd, urb->ep->hcpriv);
+	}
+#endif
+
+#ifdef CONFIG_MACH_ENDEARVORU
+	/* HTC: log for urb trace */
+	if (host_dbg_flag & DBG_EHCI_URB)
+	{
+		struct ehci_qtd *qtd;
+		qtd = list_entry(qtd_list->next, struct ehci_qtd, qtd_list);
+		ehci_info(ehci,
 			 "%s %s urb %p ep%d%s len %d, qtd %p [qh %p]\n",
 			 __func__, urb->dev->devpath, urb,
 			 epnum & 0x0f, (epnum & USB_DIR_IN) ? "in" : "out",

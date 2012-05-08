@@ -211,6 +211,15 @@ config LEDS_LP5521
 	  Driver provides direct control via LED class and interface for
 	  programming the engines.
 
+config LEDS_LP5521_HTC
+	tristate "LED Support for N.S. LP5521 LED driver chip"
+	depends on LEDS_CLASS && I2C
+	help
+	  If you say yes here you get support for the National Semiconductor
+	  LP5521 LED driver. It is 3 channel chip with programmable engines.
+	  Driver provides direct control via LED class and interface for
+	  programming the engines.
+
 config LEDS_LP5523
 	tristate "LED Support for N.S. LP5523 LED driver chip"
 	depends on LEDS_CLASS && I2C
@@ -445,6 +454,17 @@ config LEDS_TRIGGER_DEFAULT_ON
 	help
 	  This allows LEDs to be initialised in the ON state.
 	  If unsure, say Y.
+
+config LEDS_TRIGGER_SLEEP
+	tristate "LED Sleep Mode Trigger"
+	depends on LEDS_TRIGGERS && HAS_EARLYSUSPEND
+	help
+	  This turns LEDs on when the screen is off but the cpu still running.
+
+config LEDS_QUATTRO
+	tristate "LED Quattro"
+	help
+	  This turns LEDs on QUATTRO.
 
 comment "iptables trigger is under Netfilter config (LED target)"
 	depends on LEDS_TRIGGERS

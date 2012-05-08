@@ -1817,6 +1817,19 @@ static int itd_submit (struct ehci_hcd *ehci, struct urb *urb,
 		stream);
 #endif
 
+#ifdef CONFIG_MACH_ENDEARVORU
+	/* HTC: log for urb trace */
+	if (host_dbg_flag & DBG_EHCI_URB)
+		ehci_info (ehci,
+			"%s %s urb %p ep%d%s len %d, %d pkts %d uframes [%p]\n",
+			__func__, urb->dev->devpath, urb,
+			usb_pipeendpoint (urb->pipe),
+			usb_pipein (urb->pipe) ? "in" : "out",
+			urb->transfer_buffer_length,
+			urb->number_of_packets, urb->interval,
+			stream);
+#endif
+
 	/* allocate ITDs w/o locking anything */
 	status = itd_urb_transaction (stream, ehci, urb, mem_flags);
 	if (unlikely (status < 0)) {
@@ -2210,6 +2223,17 @@ static int sitd_submit (struct ehci_hcd *ehci, struct urb *urb,
 		urb->transfer_buffer_length);
 #endif
 
+#ifdef CONFIG_MACH_ENDEARVORU
+	/* HTC: log for urb trace */
+	if (host_dbg_flag & DBG_EHCI_URB)
+		ehci_info (ehci,
+			"submit %p dev%s ep%d%s-iso len %d\n",
+			urb, urb->dev->devpath,
+			usb_pipeendpoint (urb->pipe),
+			usb_pipein (urb->pipe) ? "in" : "out",
+			urb->transfer_buffer_length);
+#endif
+
 	/* allocate SITDs */
 	status = sitd_urb_transaction (stream, ehci, urb, mem_flags);
 	if (status < 0) {
@@ -2291,6 +2315,7 @@ scan_periodic (struct ehci_hcd *ehci)
 	}
 	clock &= mod - 1;
 	clock_frame = clock >> 3;
+	++ehci->periodic_stamp;
 
 	for (;;) {
 		union ehci_shadow	q, *q_p;
@@ -2319,10 +2344,14 @@ restart:
 				temp.qh = qh_get (q.qh);
 				type = Q_NEXT_TYPE(ehci, q.qh->hw->hw_next);
 				q = q.qh->qh_next;
-				modified = qh_completions (ehci, temp.qh);
-				if (unlikely(list_empty(&temp.qh->qtd_list) ||
-						temp.qh->needs_rescan))
-					intr_deschedule (ehci, temp.qh);
+				if (temp.qh->stamp != ehci->periodic_stamp) {
+					modified = qh_completions(ehci, temp.qh);
+					if (!modified)
+						temp.qh->stamp = ehci->periodic_stamp;
+					if (unlikely(list_empty(&temp.qh->qtd_list) ||
+							temp.qh->needs_rescan))
+						intr_deschedule(ehci, temp.qh);
+				}
 				qh_put (temp.qh);
 				break;
 			case Q_TYPE_FSTN:
@@ -2465,6 +2494,7 @@ restart:
 				free_cached_lists(ehci);
 				ehci->clock_frame = clock_frame;
 			}
+			++ehci->periodic_stamp;
 		} else {
 			now_uframe++;
 			now_uframe &= mod - 1;

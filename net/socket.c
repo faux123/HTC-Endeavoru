@@ -518,8 +518,15 @@ const struct file_operations bad_sock_fops = {
  *	an inode not a file.
  */
 
+int add_or_remove_port(struct sock *sk, int add_or_remove);	/* SSD_RIL: Garbage_Filter_TCP */
+
 void sock_release(struct socket *sock)
 {
+	/* ++SSD_RIL: Garbage_Filter_TCP */
+	if (sock->sk != NULL)
+		add_or_remove_port(sock->sk, 0);
+	/* --SSD_RIL: Garbage_Filter_TCP */
+
 	if (sock->ops) {
 		struct module *owner = sock->ops->owner;
 
@@ -568,7 +575,8 @@ static inline int __sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 	if (err)
 		return err;
 
-	return sock->ops->sendmsg(iocb, sock, msg, size);
+	err = sock->ops->sendmsg(iocb, sock, msg, size);
+	return err;
 }
 
 int sock_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
@@ -685,6 +693,7 @@ EXPORT_SYMBOL_GPL(__sock_recv_ts_and_drops);
 static inline int __sock_recvmsg_nosec(struct kiocb *iocb, struct socket *sock,
 				       struct msghdr *msg, size_t size, int flags)
 {
+	int err;
 	struct sock_iocb *si = kiocb_to_siocb(iocb);
 
 	sock_update_classid(sock->sk);
@@ -695,7 +704,8 @@ static inline int __sock_recvmsg_nosec(struct kiocb *iocb, struct socket *sock,
 	si->size = size;
 	si->flags = flags;
 
-	return sock->ops->recvmsg(iocb, sock, msg, size, flags);
+	err = sock->ops->recvmsg(iocb, sock, msg, size, flags);
+	return err;
 }
 
 static inline int __sock_recvmsg(struct kiocb *iocb, struct socket *sock,
@@ -1459,6 +1469,10 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 			err = sock->ops->listen(sock, backlog);
 
 		fput_light(sock->file, fput_needed);
+		/* ++SSD_RIL: Garbage_Filter_TCP */
+		if (sock->sk != NULL)
+			add_or_remove_port(sock->sk, 1);
+		/* --SSD_RIL: Garbage_Filter_TCP */
 	}
 	return err;
 }

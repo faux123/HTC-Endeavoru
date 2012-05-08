@@ -39,6 +39,10 @@
 #include <asm/stacktrace.h>
 #include <asm/mach/time.h>
 
+#include <mach/restart.h>
+extern struct htc_reboot_params *reboot_params;
+void set_dirty_state(int dirty);
+
 #ifdef CONFIG_CC_STACKPROTECTOR
 #include <linux/stackprotector.h>
 unsigned long __stack_chk_guard __read_mostly;
@@ -166,10 +170,37 @@ static void default_idle(void)
 		arch_idle();
 	local_irq_enable();
 }
+EXPORT_SYMBOL(default_idle);
+
+void default_debug_idle(void)
+{
+	//printk("[CPUIDLE] print debug message here\n");
+}
+
+void default_cpu_hotplug(void)
+{
+	//printk("[CPUHP] print debug message here\n");
+}
+
+void default_debug_dvfs(void)
+{
+     //   printk("[DVFS] print debug message here\n");
+}
 
 void (*pm_idle)(void) = default_idle;
 EXPORT_SYMBOL(pm_idle);
+void (*pm_debug_idle)(void) = default_debug_idle;
+EXPORT_SYMBOL(pm_debug_idle);
+void (*pm_debug_cpu_hotplug)(void) = default_cpu_hotplug;
+EXPORT_SYMBOL(pm_debug_cpu_hotplug);
+void (*pm_debug_dvfs)(void) = default_debug_dvfs;
+EXPORT_SYMBOL(pm_debug_dvfs);
 
+#include <linux/wakelock.h>
+#include <linux/time.h>
+#include <linux/rtc.h>
+#include <mach/board_htc.h>
+extern void htc_print_active_wake_locks();
 /*
  * The idle thread, has rather strange semantics for calling pm_idle,
  * but this is what x86 does and we need to do the same, so that
@@ -178,10 +209,33 @@ EXPORT_SYMBOL(pm_idle);
  */
 void cpu_idle(void)
 {
-	local_fiq_enable();
 
+    static bool bPrint_wake_lock = true;
+    struct timespec ts;
+    struct rtc_time tm;
+
+	local_fiq_enable();
+	u64 cur_time, last_time;
+	last_time = cpu_clock(UINT_MAX);
 	/* endless idle loop with no priority at all */
 	while (1) {
+		cur_time = cpu_clock(UINT_MAX);
+		if (((cur_time - last_time) >= 5000000000) && (smp_processor_id()==0))
+		{
+			pm_debug_idle();
+			pm_debug_cpu_hotplug();
+			//pm_debug_dvfs();
+			last_time = cpu_clock(UINT_MAX);
+			if (get_kernel_flag() & KERNEL_FLAG_PM_MONITOR && bPrint_wake_lock)
+			{
+				getnstimeofday(&ts);
+				rtc_time_to_tm(ts.tv_sec - (sys_tz.tz_minuteswest * 60), &tm);
+				printk(KERN_INFO "[PM] hTC PM Statistic  %02d-%02d %02d:%02d:%02d \n",
+					tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+				htc_print_active_wake_locks();
+			}
+			bPrint_wake_lock = !bPrint_wake_lock;
+		}
 		tick_nohz_stop_sched_tick(1);
 		leds_event(led_idle_start);
 		while (!need_resched()) {
@@ -240,6 +294,10 @@ void machine_halt(void)
 
 void machine_power_off(void)
 {
+	printk("[PWR] clear reboot reason to RESTART_REASON_POWEROFF\n");
+	reboot_params->reboot_reason = RESTART_REASON_POWEROFF;
+	printk("[PWR] clear dirty\n");
+	set_dirty_state(0);
 	machine_shutdown();
 	if (pm_power_off)
 		pm_power_off();
@@ -249,6 +307,77 @@ void machine_restart(char *cmd)
 {
 	machine_shutdown();
 	arm_pm_restart(reboot_mode, cmd);
+}
+
+/*
+ * dump a block of kernel memory from around the given address
+ */
+static void show_data(unsigned long addr, int nbytes, const char *name)
+{
+	int	i, j;
+	int	nlines;
+	u32	*p;
+
+	/*
+	 * don't attempt to dump non-kernel addresses or
+	 * values that are probably just small negative numbers
+	 */
+	if (addr < PAGE_OFFSET || addr > -256UL)
+		return;
+
+	printk("\n%s: %#lx:\n", name, addr);
+
+	/*
+	 * round address down to a 32 bit boundary
+	 * and always dump a multiple of 32 bytes
+	 */
+	p = (u32 *)(addr & ~(sizeof(u32) - 1));
+	nbytes += (addr & (sizeof(u32) - 1));
+	nlines = (nbytes + 31) / 32;
+
+
+	for (i = 0; i < nlines; i++) {
+		/*
+		 * just display low 16 bits of address to keep
+		 * each line of the dump < 80 characters
+		 */
+		printk("%04lx ", (unsigned long)p & 0xffff);
+		for (j = 0; j < 8; j++) {
+			u32	data;
+			if (probe_kernel_address(p, data)) {
+				printk(" ********");
+			} else {
+				printk(" %08x", data);
+			}
+			++p;
+		}
+		printk("\n");
+	}
+}
+
+static void show_extra_register_data(struct pt_regs *regs, int nbytes)
+{
+	mm_segment_t fs;
+
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+	show_data(regs->ARM_pc - nbytes, nbytes * 2, "PC");
+	show_data(regs->ARM_lr - nbytes, nbytes * 2, "LR");
+	show_data(regs->ARM_sp - nbytes, nbytes * 2, "SP");
+	show_data(regs->ARM_ip - nbytes, nbytes * 2, "IP");
+	show_data(regs->ARM_fp - nbytes, nbytes * 2, "FP");
+	show_data(regs->ARM_r0 - nbytes, nbytes * 2, "R0");
+	show_data(regs->ARM_r1 - nbytes, nbytes * 2, "R1");
+	show_data(regs->ARM_r2 - nbytes, nbytes * 2, "R2");
+	show_data(regs->ARM_r3 - nbytes, nbytes * 2, "R3");
+	show_data(regs->ARM_r4 - nbytes, nbytes * 2, "R4");
+	show_data(regs->ARM_r5 - nbytes, nbytes * 2, "R5");
+	show_data(regs->ARM_r6 - nbytes, nbytes * 2, "R6");
+	show_data(regs->ARM_r7 - nbytes, nbytes * 2, "R7");
+	show_data(regs->ARM_r8 - nbytes, nbytes * 2, "R8");
+	show_data(regs->ARM_r9 - nbytes, nbytes * 2, "R9");
+	show_data(regs->ARM_r10 - nbytes, nbytes * 2, "R10");
+	set_fs(fs);
 }
 
 void __show_regs(struct pt_regs *regs)
@@ -310,6 +439,8 @@ void __show_regs(struct pt_regs *regs)
 		printk("Control: %08x%s\n", ctrl, buf);
 	}
 #endif
+
+	show_extra_register_data(regs, 128);
 }
 
 void show_regs(struct pt_regs * regs)

@@ -670,4 +670,25 @@ config USB_SERIAL_DEBUG
 	  To compile this driver as a module, choose M here: the
 	  module will be called usb-debug.
 
+config USB_SERIAL_BASEBAND
+	tristate "USB Baseband Driver"
+	help
+	  Say Y here if you want to use USB baseband character driver.
+
+	  This driver may be used as a raw character device driver for
+	  USB modems.  For example, downloading modem firmware upon
+	  modem boot up (for flashless modems), or sending modem
+	  AT commands after modem software is running on device.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called baseband_chr.
+
+config USB_STE6718_MODEM
+       bool "STE6718 USB IPC modem driver"
+       depends on USB_SERIAL=y
+       default n
+       ---help---
+         Say Y here if you want to enable the AP/BP USB IPC link
+         driver for AP30 with STE6718 modem.
+
 endif # USB_SERIAL

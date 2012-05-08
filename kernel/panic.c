@@ -23,7 +23,7 @@
 #include <linux/init.h>
 #include <linux/nmi.h>
 #include <linux/dmi.h>
-
+#include <mach/restart.h>
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
 
@@ -33,7 +33,10 @@ static int pause_on_oops;
 static int pause_on_oops_flag;
 static DEFINE_SPINLOCK(pause_on_oops_lock);
 
-int panic_timeout;
+#ifndef CONFIG_PANIC_TIMEOUT
+#define CONFIG_PANIC_TIMEOUT 0
+#endif
+int panic_timeout = CONFIG_PANIC_TIMEOUT;
 EXPORT_SYMBOL_GPL(panic_timeout);
 
 ATOMIC_NOTIFIER_HEAD(panic_notifier_list);
@@ -63,7 +66,10 @@ NORET_TYPE void panic(const char * fmt, ...)
 	va_list args;
 	long i, i_next = 0;
 	int state = 0;
-
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || \
+    defined(CONFIG_MACH_VERTEXF) || defined(CONFIG_MACH_VERTEXFP)
+	set_ramdump_reason("Kernel panic");
+#endif
 	/*
 	 * It's possible to come here directly from a panic-assertion and
 	 * not have preempt disabled. Some functions called from here want

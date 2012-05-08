@@ -33,6 +33,11 @@
 #include <linux/slab.h>
 #include <linux/moduleparam.h>
 #include <sound/core.h>
+
+#ifdef CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA
+#include <mach/hdmi-audio.h>
+#endif
+
 #include "hda_codec.h"
 #include "hda_local.h"
 
@@ -714,6 +719,8 @@ static void hdmi_intrinsic_event(struct hda_codec *codec, unsigned int res)
 
 	spec->sink_eld[index].monitor_present = pind;
 	spec->sink_eld[index].eld_valid = eldv;
+	if (!eldv)
+		spec->sink_eld[index].lpcm_sad_ready = eldv;
 
 	if (pind && eldv) {
 		hdmi_get_show_eld(codec, spec->pin[index],
@@ -839,6 +846,71 @@ static int hdmi_pcm_open(struct hda_pcm_stream *hinfo,
 		*codec_pars = *hinfo;
 
 	eld = &spec->sink_eld[idx];
+
+       if(eld==0)
+       {
+				snd_printk(KERN_WARNING
+					   "hdmi_pcm_open(): eld is null\n");
+       }
+
+       if(codec==0 )
+       {
+				snd_printk(KERN_WARNING
+					   "hdmi_pcm_open(): codec is null\n");
+       }
+       if(codec->preset==0)
+       {
+				snd_printk(KERN_WARNING
+					   "hdmi_pcm_open(): codec preset is null\n");
+       }
+#ifdef CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA
+#if 0 //Remove Audio delay for ELD
+	if ((codec->preset->id == 0x10de0020) &&
+	    (!eld->eld_valid || !eld->sad_count)) {
+		int err = 0;
+		unsigned long timeout;
+
+		if (!eld->eld_valid) {
+			err = tegra_hdmi_setup_hda_presence();
+			if (err < 0) {
+				snd_printk(KERN_WARNING
+					   "HDMI: No HDMI device connected\n");
+				return -ENODEV;
+			}
+		}
+
+		timeout = jiffies + msecs_to_jiffies(5000);
+		for (;;) {
+			if (eld->eld_valid && eld->sad_count)
+				break;
+
+			if (time_after(jiffies, timeout))
+				break;
+
+		snd_printk(KERN_WARNING
+			   "hdmi_pcm_open(): jiffies waiting...\n");
+			mdelay(10);
+		}
+	}
+#else
+	if ((codec->preset->id == 0x10de0020) &&
+	    (!eld->eld_valid || !eld->sad_count || !eld->lpcm_sad_ready)) {
+
+		if (!eld->eld_valid) {
+			if (tegra_hdmi_setup_hda_presence() < 0) {
+				snd_printk(KERN_WARNING
+					   "HDMI: No HDMI device connected\n");
+				return -ENODEV;
+			}
+		}
+
+		if (!eld->lpcm_sad_ready)
+			return -EAGAIN;
+	}
+
+#endif
+#endif
+
 	if (!static_hdmi_pcm && eld->eld_valid && eld->sad_count > 0) {
 		hdmi_eld_update_pcm_info(eld, hinfo, codec_pars);
 		if (hinfo->channels_min > hinfo->channels_max ||
@@ -1010,8 +1082,8 @@ static int hdmi_parse_codec(struct hda_codec *codec)
 	 * HDA link is powered off at hot plug or hw initialization time.
 	 */
 #ifdef CONFIG_SND_HDA_POWER_SAVE
-	if (!(snd_hda_param_read(codec, codec->afg, AC_PAR_POWER_STATE) &
-	      AC_PWRST_EPSS))
+	if ((!(snd_hda_param_read(codec, codec->afg, AC_PAR_POWER_STATE) &
+	      AC_PWRST_EPSS)) && (codec->preset->id != 0x10de0020))
 		codec->bus->power_keep_link_on = 1;
 #endif
 
@@ -1036,6 +1108,20 @@ static int generic_hdmi_playback_pcm_prepare(struct hda_pcm_stream *hinfo,
 					   unsigned int format,
 					   struct snd_pcm_substream *substream)
 {
+#if defined(CONFIG_SND_HDA_PLATFORM_NVIDIA_TEGRA) && defined(CONFIG_TEGRA_DC)
+	if (codec->preset->id == 0x10de0020) {
+		int err = 0;
+		/* Set hdmi:audio freq and source selection*/
+		err = tegra_hdmi_setup_audio_freq_source(
+					substream->runtime->rate, HDA);
+		if ( err < 0 ) {
+			snd_printk(KERN_ERR
+				"Unable to set hdmi audio freq to %d \n",
+						substream->runtime->rate);
+			return err;
+		}
+	}
+#endif
 	hdmi_set_channel_count(codec, hinfo->nid,
 			       substream->runtime->channels);
 
@@ -1103,6 +1189,14 @@ static int generic_hdmi_init(struct hda_codec *codec)
 {
 	struct hdmi_spec *spec = codec->spec;
 	int i;
+
+	switch (codec->preset->id) {
+	case 0x10de0020:
+		snd_hda_codec_write(codec, 4, 0,
+				    AC_VERB_SET_DIGI_CONVERT_1, 0x11);
+	default:
+		break;
+	}
 
 	for (i = 0; spec->pin[i]; i++) {
 		hdmi_enable_output(codec, spec->pin[i]);
@@ -1664,6 +1758,7 @@ static struct hda_codec_preset snd_hda_preset_hdmi[] = {
 { .id = 0x10de001a, .name = "GPU 1a HDMI/DP",	.patch = patch_nvhdmi_8ch_89 },
 { .id = 0x10de001b, .name = "GPU 1b HDMI/DP",	.patch = patch_nvhdmi_8ch_89 },
 { .id = 0x10de001c, .name = "GPU 1c HDMI/DP",	.patch = patch_nvhdmi_8ch_89 },
+{ .id = 0x10de0020, .name = "Tegra30 HDMI",	.patch = patch_nvhdmi_8ch_89 },
 { .id = 0x10de0040, .name = "GPU 40 HDMI/DP",	.patch = patch_nvhdmi_8ch_89 },
 { .id = 0x10de0041, .name = "GPU 41 HDMI/DP",	.patch = patch_nvhdmi_8ch_89 },
 { .id = 0x10de0042, .name = "GPU 42 HDMI/DP",	.patch = patch_nvhdmi_8ch_89 },
@@ -1708,6 +1803,7 @@ MODULE_ALIAS("snd-hda-codec-id:10de0019");
 MODULE_ALIAS("snd-hda-codec-id:10de001a");
 MODULE_ALIAS("snd-hda-codec-id:10de001b");
 MODULE_ALIAS("snd-hda-codec-id:10de001c");
+MODULE_ALIAS("snd-hda-codec-id:10de0020");
 MODULE_ALIAS("snd-hda-codec-id:10de0040");
 MODULE_ALIAS("snd-hda-codec-id:10de0041");
 MODULE_ALIAS("snd-hda-codec-id:10de0042");

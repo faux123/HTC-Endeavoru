@@ -37,6 +37,7 @@
 
 #include <asm/irq.h>
 #include <asm/uaccess.h>
+#include <htc/log.h>
 
 /*
  * This is used to lock changes in serial line configuration.
@@ -92,6 +93,9 @@ static void __uart_start(struct tty_struct *tty)
 {
 	struct uart_state *state = tty->driver_data;
 	struct uart_port *port = state->uart_port;
+
+	if (port->ops->wake_peer)
+		port->ops->wake_peer(port);
 
 	if (!uart_circ_empty(&state->xmit) && state->xmit.buf &&
 	    !tty->stopped && !tty->hw_stopped)
@@ -1295,6 +1299,7 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 		 * one, we've got real problems, since it means the
 		 * serial port won't be shutdown.
 		 */
+//		printk(KERN_ERR "uart_close: bad serial port count; tty->count is 1, "
 		printk(KERN_ERR "uart_close: bad serial port count; tty->count is 1, "
 		       "port->count is %d\n", port->count);
 		port->count = 1;
@@ -2157,9 +2162,14 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
 		 * successfully registered yet, try to re-register it.
 		 * It may be that the port was not available.
 		 */
-		if (port->cons && !(port->cons->flags & CON_ENABLED))
+		printk("port->cons=0x%X ", port->cons);
+		if (!port->cons)
+			printk("\n");
+		else
+			printk("port->cons->flags=0x%X\n", port->cons->flags);
+		if (port->cons && !(port->cons->flags & CON_ENABLED)) {
 			register_console(port->cons);
-
+		}
 		/*
 		 * Power down all ports by default, except the
 		 * console if we have one.

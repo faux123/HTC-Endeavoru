@@ -37,6 +37,7 @@ obj-$(CONFIG_JME) += jme.o
 obj-$(CONFIG_BE2NET) += benet/
 obj-$(CONFIG_VMXNET3) += vmxnet3/
 obj-$(CONFIG_BNA) += bna/
+obj-$(CONFIG_IP_OVER_TTY) += ip_over_tty/
 
 gianfar_driver-objs := gianfar.o \
 		gianfar_ethtool.o \
@@ -107,7 +108,7 @@ obj-$(CONFIG_ADAPTEC_STARFIRE) += starfire.o
 obj-$(CONFIG_RIONET) += rionet.o
 obj-$(CONFIG_SH_ETH) += sh_eth.o
 obj-$(CONFIG_STMMAC_ETH) += stmmac/
-
+obj-$(CONFIG_KINETO_GAN) += kineto_gan.o
 #
 # end link order section
 #
@@ -167,6 +168,8 @@ obj-$(CONFIG_PPP_MPPE) += ppp_mppe.o
 obj-$(CONFIG_PPPOE) += pppox.o pppoe.o
 obj-$(CONFIG_PPPOL2TP) += pppox.o
 obj-$(CONFIG_PPTP) += pppox.o pptp.o
+obj-$(CONFIG_PPPOLAC) += pppox.o pppolac.o
+obj-$(CONFIG_PPPOPNS) += pppox.o pppopns.o
 
 obj-$(CONFIG_SLIP) += slip.o
 obj-$(CONFIG_SLHC) += slhc.o
@@ -281,6 +284,7 @@ obj-$(CONFIG_USB_HSO)		+= usb/
 obj-$(CONFIG_USB_USBNET)        += usb/
 obj-$(CONFIG_USB_ZD1201)        += usb/
 obj-$(CONFIG_USB_IPHETH)        += usb/
+obj-$(CONFIG_USB_NET_RAW_IP)    += usb/
 
 obj-$(CONFIG_WLAN) += wireless/
 obj-$(CONFIG_NET_TULIP) += tulip/
