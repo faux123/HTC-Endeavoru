@@ -171,7 +171,11 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 			   const char *buf, size_t n)
 {
 #ifdef CONFIG_SUSPEND
+#ifdef CONFIG_EARLYSUSPEND
+	suspend_state_t state = PM_SUSPEND_ON;
+#else
 	suspend_state_t state = PM_SUSPEND_STANDBY;
+#endif
 	const char * const *s;
 #endif
 	char *p;
@@ -193,7 +197,14 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 			break;
 	}
 	if (state < PM_SUSPEND_MAX && *s)
+#ifdef CONFIG_EARLYSUSPEND
+		if (state == PM_SUSPEND_ON || valid_state(state)) {
+			error = 0;
+			request_suspend_state(state);
+		}
+#else
 		error = enter_state(state);
+#endif
 #endif
 
  Exit:
@@ -298,6 +309,192 @@ power_attr(pm_trace_dev_match);
 
 #endif /* CONFIG_PM_TRACE */
 
+#ifdef CONFIG_USER_WAKELOCK
+power_attr(wake_lock);
+power_attr(wake_unlock);
+#endif
+
+#ifdef CONFIG_HTC_ONMODE_CHARGING
+static ssize_t state_onchg_show(struct kobject *kobj, struct kobj_attribute *attr,
+			     char *buf)
+{
+	char *s = buf;
+	if (get_onchg_state())
+		s += sprintf(s, "chgoff ");
+	else
+		s += sprintf(s, "chgon ");
+
+	if (s != buf)
+		/* convert the last space to a newline */
+		*(s-1) = '\n';
+
+	return (s - buf);
+}
+
+static ssize_t
+state_onchg_store(struct kobject *kobj, struct kobj_attribute *attr,
+	       const char *buf, size_t n)
+{
+	char *p;
+	int len;
+
+	p = memchr(buf, '\n', n);
+	len = p ? p - buf : n;
+
+	if (len == 5 || len == 6 || len == 7) {
+		if (!strncmp(buf, "chgon", len))
+			request_onchg_state(1);
+		else if (!strncmp(buf, "chgoff", len))
+			request_onchg_state(0);
+	}
+
+	return 0;
+}
+
+power_attr(state_onchg);
+#endif
+
+#ifdef CONFIG_HTC_PNPMGR
+static int launch_event_enabled = 0;
+
+static ssize_t
+launch_event_show(struct kobject *kobj, struct kobj_attribute *attr,
+                char *buf)
+{
+        return sprintf(buf, "%d\n", launch_event_enabled);
+}
+
+static ssize_t
+launch_event_store(struct kobject *kobj, struct kobj_attribute *attr,
+                const char *buf, size_t n)
+{
+        unsigned long val;
+
+        if (strict_strtoul(buf, 10, &val))
+                return -EINVAL;
+
+        if (val > 1)
+                return -EINVAL;
+
+        launch_event_enabled = val;
+	sysfs_notify(kobj, NULL, "launch_event");
+        return n;
+}
+power_attr(launch_event);
+
+
+#define MAX_BUF 128
+static char launch_activity[MAX_BUF];
+static void null_cb(const char *attr) {
+	do { } while (0);
+}
+
+static ssize_t
+launch_activity_show(struct kobject *kobj, struct kobj_attribute *attr,
+                char *buf)
+{
+		return snprintf(buf, strnlen(launch_activity, MAX_BUF) + 1, launch_activity);
+}
+
+static ssize_t
+launch_activity_store(struct kobject *kobj, struct kobj_attribute *attr,
+                const char *buf, size_t n)
+{
+		strncpy(launch_activity, buf, MAX_BUF);
+		launch_activity[MAX_BUF-1] = '\0';
+		(null_cb)(launch_activity);
+		sysfs_notify(kobj, NULL, "launch_activity");
+		return n;
+}
+power_attr(launch_activity);
+
+static int cpunum_max;
+static int cpunum_min;
+
+/* Show the locked greatest cpu min number. Show 0 if no lock */
+static ssize_t
+cpunum_floor_show(struct kobject *kobj, struct kobj_attribute *attr,
+               char *buf)
+{
+       int i;
+       int all_cpus = num_possible_cpus();
+       for (i = all_cpus-1 ; i >= 0 ; i--) {
+               if (cpunum_min & (1 << i))
+                   break;
+       }
+       if (i < 0)
+           i = 0;
+       else
+           i++;
+
+       return sprintf(buf, "%d\n", i);
+}
+
+/* Store by bit. bit 0 = single core, bit 1 = dual core. */
+static ssize_t
+cpunum_floor_store(struct kobject *kobj, struct kobj_attribute *attr,
+               const char *buf, size_t n)
+{
+       int val, bit, on;
+
+       if (sscanf(buf, "%d", &val) > 0) {
+               bit = val / 2;
+               on = val % 2;
+               if (bit >= num_possible_cpus() || bit < 0)
+                   return -EINVAL;
+               if (on)
+                   cpunum_min |= (1 << bit);
+               else
+                   cpunum_min &= ~(1 << bit);
+               sysfs_notify(kobj, NULL, "cpunum_floor");
+               return n;
+       }
+       return -EINVAL;
+}
+
+static ssize_t
+cpunum_ceiling_show(struct kobject *kobj, struct kobj_attribute *attr,
+               char *buf)
+{
+       int i;
+       int all_cpus = num_possible_cpus();
+       for (i = 0 ; i < all_cpus ; i++) {
+               if (cpunum_max & (1 << i))
+                   break;
+       }
+       if (i >= all_cpus)
+           i = 0;
+       else
+           i++;
+
+       return sprintf(buf, "%d\n", i);
+}
+
+static ssize_t
+cpunum_ceiling_store(struct kobject *kobj, struct kobj_attribute *attr,
+               const char *buf, size_t n)
+{
+       int val, bit, on;
+
+       if (sscanf(buf, "%d", &val) > 0) {
+               bit = val / 2;
+               on = val % 2;
+               if (bit >= num_possible_cpus() || bit < 0)
+                   return -EINVAL;
+               if (on)
+                   cpunum_max |= (1 << bit);
+               else
+                   cpunum_max &= ~(1 << bit);
+               sysfs_notify(kobj, NULL, "cpunum_ceiling");
+               return n;
+       }
+       return -EINVAL;
+}
+
+power_attr(cpunum_floor);
+power_attr(cpunum_ceiling);
+#endif
+
 static struct attribute * g[] = {
 	&state_attr.attr,
 #ifdef CONFIG_PM_TRACE
@@ -310,6 +507,19 @@ static struct attribute * g[] = {
 #ifdef CONFIG_PM_DEBUG
 	&pm_test_attr.attr,
 #endif
+#ifdef CONFIG_USER_WAKELOCK
+	&wake_lock_attr.attr,
+	&wake_unlock_attr.attr,
+#endif
+#ifdef CONFIG_HTC_ONMODE_CHARGING
+	&state_onchg_attr.attr,
+#endif
+#endif
+#ifdef CONFIG_HTC_PNPMGR
+	&launch_event_attr.attr,
+	&launch_activity_attr.attr,
+	&cpunum_floor_attr.attr,
+	&cpunum_ceiling_attr.attr,
 #endif
 	NULL,
 };

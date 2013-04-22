@@ -17,7 +17,7 @@
 #include "nl80211.h"
 #include "wext-compat.h"
 
-#define IEEE80211_SCAN_RESULT_EXPIRE	(15 * HZ)
+#define IEEE80211_SCAN_RESULT_EXPIRE	(3 * HZ)
 
 void ___cfg80211_scan_done(struct cfg80211_registered_device *rdev, bool leak)
 {
@@ -68,8 +68,11 @@ void ___cfg80211_scan_done(struct cfg80211_registered_device *rdev, bool leak)
 	 * the scan request or not ... if it accesses the dev
 	 * in there (it shouldn't anyway) then it may crash.
 	 */
-	if (!leak)
+	if (!leak) {
+		/* broadcom clean magci word */
+		request->magic = 0;
 		kfree(request);
+	}
 }
 
 void __cfg80211_scan_done(struct work_struct *wk)

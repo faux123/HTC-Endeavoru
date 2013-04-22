@@ -105,6 +105,13 @@ struct gpio_chip {
 						unsigned offset, int value);
 	int			(*set_debounce)(struct gpio_chip *chip,
 						unsigned offset, unsigned debounce);
+#if defined(CONFIG_GPIO_PULL)
+	#define __GPIO_PULL_NONE 0x0
+	#define __GPIO_PULL_UP   0x1
+	#define __GPIO_PULL_DOWN 0x2
+	int			(*set_pull)(struct gpio_chip *chip,
+						unsigned offset, unsigned pull);
+#endif
 
 	void			(*set)(struct gpio_chip *chip,
 						unsigned offset, int value);
@@ -199,6 +206,20 @@ extern int gpio_sysfs_set_active_low(unsigned gpio, int value);
 extern void gpio_unexport(unsigned gpio);
 
 #endif	/* CONFIG_GPIO_SYSFS */
+
+void __gpio_set_pull(unsigned gpio, unsigned pull);
+#if defined(CONFIG_GPIO_PULL)
+#define gpio_set_pullnone(gpio) __gpio_set_pull(gpio, __GPIO_PULL_NONE)
+#define gpio_set_pullup(gpio)   __gpio_set_pull(gpio, __GPIO_PULL_UP)
+#define gpio_set_pulldown(gpio) __gpio_set_pull(gpio, __GPIO_PULL_DOWN)
+#else
+#define ___pr_warn_function_not_implemented \
+    do {pr_warn("%s: gpio_set_pull* function not implemented!\n", __func__);} \
+    while(0)
+#define gpio_set_pullnone(gpio) ___pr_warn_function_not_implemented
+#define gpio_set_pullup(gpio)   ___pr_warn_function_not_implemented
+#define gpio_set_pulldown(gpio) ___pr_warn_function_not_implemented
+#endif
 
 #else	/* !CONFIG_GPIOLIB */
 

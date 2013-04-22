@@ -1006,8 +1006,14 @@ static void dapm_seq_run(struct snd_soc_dapm_context *dapm,
 		/* Do we need to apply any queued changes? */
 		if (sort[w->id] != cur_sort || w->reg != cur_reg ||
 		    w->dapm != cur_dapm || w->subseq != cur_subseq) {
-			if (!list_empty(&pending))
-				dapm_seq_run_coalesced(cur_dapm, &pending);
+			if (!list_empty(&pending)){
+				if(cur_dapm == NULL){
+					printk(KERN_WARNING "dapm_seq_run: cur_dapm == NULL when entering dapm_seq_run_coalesced\n");
+				}
+				else{
+					dapm_seq_run_coalesced(cur_dapm, &pending);
+				}
+			}
 
 			if (cur_dapm && cur_dapm->seq_notifier) {
 				for (i = 0; i < ARRAY_SIZE(dapm_up_seq); i++)
@@ -1064,6 +1070,11 @@ static void dapm_seq_run(struct snd_soc_dapm_context *dapm,
 		if (ret < 0)
 			dev_err(w->dapm->dev,
 				"Failed to apply widget power: %d\n", ret);
+	}
+
+	if (cur_dapm == NULL){
+		printk(KERN_WARNING "dapm_seq_run: cur_dapm == NULL\n");
+		return;
 	}
 
 	if (!list_empty(&pending))

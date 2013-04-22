@@ -43,7 +43,7 @@
 #include <linux/dma-mapping.h>
 
 #include "usb.h"
-
+#include <asm/mach-types.h>
 
 const char *usbcore_name = "usbcore";
 
@@ -450,8 +450,7 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 	INIT_LIST_HEAD(&dev->filelist);
 
 #ifdef	CONFIG_PM
-	pm_runtime_set_autosuspend_delay(&dev->dev,
-			usb_autosuspend_delay * 1000);
+	pm_runtime_set_autosuspend_delay(&dev->dev,	usb_autosuspend_delay * 1000);
 	dev->connect_time = jiffies;
 	dev->active_duration = -jiffies;
 #endif

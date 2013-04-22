@@ -34,6 +34,8 @@
 #define N_TI_WL		22	/* for TI's WL BT, FM, GPS combo chips */
 #define N_TRACESINK	23	/* Trace data routing for MIPI P1149.7 */
 #define N_TRACEROUTER	24	/* Trace data routing for MIPI P1149.7 */
+#define N_TS2710	25      /* 3GPP TS 27.010 MUX over UART */
+#define N_IP_OVER_TTY   26      /* IP over TTY network driver */
 
 #ifdef __KERNEL__
 #include <linux/fs.h>
@@ -295,7 +297,7 @@ struct tty_struct {
 	void *driver_data;
 	struct list_head tty_files;
 
-#define N_TTY_BUF_SIZE 4096
+#define N_TTY_BUF_SIZE 32768
 
 	/*
 	 * The following is data for the N_TTY line discipline.  For

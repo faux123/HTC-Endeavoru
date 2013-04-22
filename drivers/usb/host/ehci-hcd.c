@@ -48,6 +48,9 @@
 #include <asm/system.h>
 #include <asm/unaligned.h>
 
+#include <asm/mach-types.h>	//htc
+#include <mach/board_htc.h>	//htc
+
 /*-------------------------------------------------------------------------*/
 
 /*
@@ -203,7 +206,10 @@ static int tdi_in_host_mode (struct ehci_hcd *ehci)
 	u32 __iomem	*reg_ptr;
 	u32		tmp;
 
-	reg_ptr = (u32 __iomem *)(((u8 __iomem *)ehci->regs) + USBMODE);
+	if (ehci->has_hostpc)
+		reg_ptr = (u32 __iomem *)(((u8 __iomem *)ehci->regs) + USBMODE_EX);
+	else
+		reg_ptr = (u32 __iomem *)(((u8 __iomem *)ehci->regs) + USBMODE);
 	tmp = ehci_readl(ehci, reg_ptr);
 	return (tmp & 3) == USBMODE_CM_HC;
 }
@@ -277,7 +283,10 @@ static int ehci_reset (struct ehci_hcd *ehci)
 
 	command |= CMD_RESET;
 	dbg_cmd (ehci, "reset", command);
-	ehci_writel(ehci, command, &ehci->regs->command);
+#ifdef CONFIG_USB_EHCI_TEGRA
+	if (!ehci->controller_resets_phy)
+#endif
+		ehci_writel(ehci, command, &ehci->regs->command);
 	ehci_to_hcd(ehci)->state = HC_STATE_HALT;
 	ehci->next_statechange = jiffies;
 	retval = handshake (ehci, &ehci->regs->command,
@@ -899,7 +908,12 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 			 */
 			ehci->reset_done[i] = jiffies + msecs_to_jiffies(25);
 			ehci_dbg (ehci, "port %d remote wakeup\n", i + 1);
+			printk("%s: port %d remote wakeup\n",__func__, i+1);
 			mod_timer(&hcd->rh_timer, ehci->reset_done[i]);
+#ifdef CONFIG_USB_EHCI_TEGRA
+			pr_info( "Debug for remote wakeup hang: %s set crw to true", __func__ );
+			ehci->controller_remote_wakeup = true;
+#endif
 		}
 	}
 
@@ -919,8 +933,15 @@ dead:
 		bh = 1;
 	}
 
-	if (bh)
+	if (bh) {
+		//htc_dbg+++
+		if (get_radio_flag() & 0x0001) {
+			trace_printk("USBSTS 0x%X ehci->async->qh_next.qh %p\n",
+				status, ehci->async->qh_next.qh);
+		}
+		//htc_dbg---
 		ehci_work (ehci);
+	}
 	spin_unlock (&ehci->lock);
 	if (pcd_status)
 		usb_hcd_poll_rh_status(hcd);
@@ -1303,6 +1324,12 @@ MODULE_LICENSE ("GPL");
 #include "ehci-tegra.c"
 #define PLATFORM_DRIVER		tegra_ehci_driver
 #endif
+
+//htc+++
+#ifdef CONFIG_QCT_9K_MODEM
+#include "ehci-qct-mdm.c"
+#endif
+//htc---
 
 #ifdef CONFIG_USB_EHCI_S5P
 #include "ehci-s5p.c"

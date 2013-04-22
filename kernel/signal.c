@@ -37,6 +37,9 @@
 #include <asm/siginfo.h>
 #include "audit.h"	/* audit_signal_info() */
 
+static struct dying_pid dying_pid_buf[MAX_DYING_PROC_COUNT];
+static unsigned int dying_pid_buf_idx;
+
 /*
  * SLAB caches for signal bits.
  */
@@ -1113,10 +1116,31 @@ out_set:
 	return 0;
 }
 
+int dying_processors_read_proc(char *page, char **start, off_t off,
+			   int count, int *eof, void *data)
+{
+	char *p = page;
+	unsigned long jiffy = jiffies;
+	int i;
+
+	for (i = 0; i < MAX_DYING_PROC_COUNT; i++)
+		p += sprintf(p, "%ld:%ld\n", (long int)dying_pid_buf[i].pid, (dying_pid_buf[i].pid == 0? 0: (jiffy - dying_pid_buf[i].jiffy)));
+
+	return p - page;
+}
+
 static int send_signal(int sig, struct siginfo *info, struct task_struct *t,
 			int group)
 {
 	int from_ancestor_ns = 0;
+
+	if (sig == SIGKILL) {
+		dying_pid_buf[dying_pid_buf_idx].pid = t->pid;
+		dying_pid_buf[dying_pid_buf_idx].jiffy = jiffies;
+
+		dying_pid_buf_idx++;
+		dying_pid_buf_idx = (dying_pid_buf_idx % MAX_DYING_PROC_COUNT);
+	}
 
 #ifdef CONFIG_PID_NS
 	from_ancestor_ns = si_fromuser(info) &&
@@ -2735,6 +2759,10 @@ SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
 	info.si_code = SI_USER;
 	info.si_pid = task_tgid_vnr(current);
 	info.si_uid = current_uid();
+
+	//To show the message if init process is killed.
+	if(unlikely(pid== -1))
+		printk("%s(): %s (pid %d) is sending %d signal to init process\n", __func__, current->comm, task_pid_nr(current), sig);
 
 	return kill_something_info(sig, &info, pid);
 }

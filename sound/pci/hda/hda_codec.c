@@ -604,6 +604,7 @@ EXPORT_SYMBOL_HDA(snd_hda_get_conn_index);
  */
 int snd_hda_queue_unsol_event(struct hda_bus *bus, u32 res, u32 res_ex)
 {
+	printk(KERN_INFO "ENTERING snd_hda_queue_unsol_event()");
 	struct hda_bus_unsolicited *unsol;
 	unsigned int wp;
 
@@ -629,6 +630,7 @@ EXPORT_SYMBOL_HDA(snd_hda_queue_unsol_event);
  */
 static void process_unsol_events(struct work_struct *work)
 {
+	printk(KERN_INFO "ENTERING process_unsol_events\n");
 	struct hda_bus_unsolicited *unsol =
 		container_of(work, struct hda_bus_unsolicited, work);
 	struct hda_bus *bus = unsol->bus;
@@ -654,6 +656,7 @@ static void process_unsol_events(struct work_struct *work)
  */
 static int init_unsol_queue(struct hda_bus *bus)
 {
+	printk(KERN_INFO "ENTERING init_unsol_queue");
 	struct hda_bus_unsolicited *unsol;
 
 	if (bus->unsol) /* already initialized */
@@ -765,7 +768,7 @@ int /*__devinit*/ snd_hda_bus_new(struct snd_card *card,
 
 	snprintf(bus->workq_name, sizeof(bus->workq_name),
 		 "hd-audio%d", card->number);
-	bus->workq = create_singlethread_workqueue(bus->workq_name);
+	bus->workq = create_freezable_workqueue(bus->workq_name);
 	if (!bus->workq) {
 		snd_printk(KERN_ERR "cannot create workqueue %s\n",
 			   bus->workq_name);
@@ -1344,7 +1347,7 @@ EXPORT_SYMBOL_HDA(snd_hda_codec_new);
 int snd_hda_codec_configure(struct hda_codec *codec)
 {
 	int err;
-
+	printk(KERN_INFO "ENTERING snd_hda_codec_configure()\n");
 	codec->preset = find_codec_preset(codec);
 	if (!codec->vendor_name || !codec->chip_name) {
 		err = get_codec_name(codec);
@@ -2840,6 +2843,25 @@ static int snd_hda_spdif_out_switch_put(struct snd_kcontrol *kcontrol,
 	return change;
 }
 
+int snd_hda_hdmi_decode_info(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 0xFFFFFFFF;
+	return 0;
+}
+
+static int snd_hda_hdmi_decode_get(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct hda_codec *codec = snd_kcontrol_chip(kcontrol);
+
+	ucontrol->value.integer.value[0] = codec->recv_dec_cap;
+	return 0;
+}
+
 static struct snd_kcontrol_new dig_mixes[] = {
 	{
 		.access = SNDRV_CTL_ELEM_ACCESS_READ,
@@ -2868,6 +2890,12 @@ static struct snd_kcontrol_new dig_mixes[] = {
 		.info = snd_hda_spdif_out_switch_info,
 		.get = snd_hda_spdif_out_switch_get,
 		.put = snd_hda_spdif_out_switch_put,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "HDA Decode Capability",
+		.info = snd_hda_hdmi_decode_info,
+		.get = snd_hda_hdmi_decode_get,
 	},
 	{ } /* end */
 };
@@ -3261,7 +3289,7 @@ void snd_hda_codec_set_power_to_all(struct hda_codec *codec, hda_nid_t fg,
 						   AC_VERB_GET_POWER_STATE, 0);
 			if (state == power_state)
 				break;
-			msleep(1);
+			mdelay(1);
 		} while (time_after_eq(end_time, jiffies));
 	}
 }
@@ -3323,6 +3351,7 @@ static void hda_call_codec_suspend(struct hda_codec *codec)
  */
 static void hda_call_codec_resume(struct hda_codec *codec)
 {
+	printk(KERN_INFO "ENTERING hda_call_codec_resume");
 	hda_set_power_state(codec,
 			    codec->afg ? codec->afg : codec->mfg,
 			    AC_PWRST_D0);
@@ -3372,6 +3401,7 @@ EXPORT_SYMBOL_HDA(snd_hda_build_controls);
 
 int snd_hda_codec_build_controls(struct hda_codec *codec)
 {
+	printk(KERN_INFO "ENTERING snd_hda_codec_build_controls");
 	int err = 0;
 	hda_exec_init_verbs(codec);
 	/* continue to initialize... */
@@ -4139,6 +4169,9 @@ void snd_hda_power_up(struct hda_codec *codec)
 {
 	struct hda_bus *bus = codec->bus;
 
+	if(cancel_delayed_work(&codec->power_work)){
+		codec->power_transition = 0;
+	}
 	codec->power_count++;
 	if (codec->power_on || codec->power_transition)
 		return;

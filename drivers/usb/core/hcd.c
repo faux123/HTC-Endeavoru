@@ -44,6 +44,8 @@
 
 #include "usb.h"
 
+#include <mach/board_htc.h>	//htc
+#include <asm/mach-types.h>	//htc
 
 /*-------------------------------------------------------------------------*/
 
@@ -1509,6 +1511,19 @@ static int unlink1(struct usb_hcd *hcd, struct urb *urb, int status)
 {
 	int		value;
 
+	if (!hcd) {
+		pr_info("%s:hcd=null\n", __func__);
+		return -EINVAL;
+	}
+	if (!urb) {
+		pr_info("%s:urb=null\n", __func__);
+		return -EINVAL;
+	}
+	if (!urb->dev) {
+		pr_info("%s:urb->dev=null\n", __func__);
+		return -ENODEV;
+	}
+
 	if (is_root_hub(urb->dev))
 		value = usb_rh_urb_dequeue(hcd, urb, status);
 	else {
@@ -1529,7 +1544,7 @@ static int unlink1(struct usb_hcd *hcd, struct urb *urb, int status)
  */
 int usb_hcd_unlink_urb (struct urb *urb, int status)
 {
-	struct usb_hcd		*hcd;
+	struct usb_hcd		*hcd = NULL;
 	int			retval = -EIDRM;
 	unsigned long		flags;
 
@@ -1545,9 +1560,14 @@ int usb_hcd_unlink_urb (struct urb *urb, int status)
 	}
 	spin_unlock_irqrestore(&hcd_urb_unlink_lock, flags);
 	if (retval == 0) {
+		if (!(urb && urb->dev && urb->dev->bus)) {
+			pr_info("%s[%d]: urb %p invalid !!!\n", __func__, __LINE__, urb);
+			return -EINVAL;
+		}
 		hcd = bus_to_hcd(urb->dev->bus);
 		retval = unlink1(hcd, urb, status);
-		usb_put_dev(urb->dev);
+		if (urb)
+			usb_put_dev(urb->dev);
 	}
 
 	if (retval == 0)
@@ -1612,6 +1632,9 @@ void usb_hcd_flush_endpoint(struct usb_device *udev,
 {
 	struct usb_hcd		*hcd;
 	struct urb		*urb;
+	//HTC+++
+	struct usb_hcd		*urb_hcd;
+	//HTC---
 
 	if (!ep)
 		return;
@@ -1632,7 +1655,7 @@ rescan:
 
 		/* kick hcd */
 		unlink1(hcd, urb, -ESHUTDOWN);
-		dev_dbg (hcd->self.controller,
+		dev_info (hcd->self.controller,
 			"shutdown urb %p ep%d%s%s\n",
 			urb, usb_endpoint_num(&ep->desc),
 			is_in ? "in" : "out",
@@ -1672,6 +1695,36 @@ rescan:
 		spin_unlock_irq(&hcd_urb_list_lock);
 
 		if (urb) {
+			//HTC+++
+			if (machine_is_evitareul() && (get_radio_flag() & 0x0008)) {
+				int	is_in;
+				is_in = usb_urb_dir_in(urb);
+				dev_info (hcd->self.controller,
+					"usb_kill_urb urb %p ep%d%s%s\n",
+					urb, usb_endpoint_num(&ep->desc),
+					is_in ? "in" : "out",
+					({	char *s;
+
+						 switch (usb_endpoint_type(&ep->desc)) {
+						 case USB_ENDPOINT_XFER_CONTROL:
+							s = ""; break;
+						 case USB_ENDPOINT_XFER_BULK:
+							s = "-bulk"; break;
+						 case USB_ENDPOINT_XFER_INT:
+							s = "-intr"; break;
+						 default:
+					 		s = "-iso"; break;
+						};
+						s;
+					}));
+
+				if (urb->dev && urb->dev->bus) {
+					urb_hcd = bus_to_hcd(urb->dev->bus);
+					pr_info("urb_hcd:%p hcd:%p\n", urb_hcd, hcd);
+				}
+			}
+			//HTC---
+
 			usb_kill_urb (urb);
 			usb_put_urb (urb);
 		}
@@ -1975,6 +2028,9 @@ int hcd_bus_suspend(struct usb_device *rhdev, pm_message_t msg)
 		status = hcd->driver->bus_suspend(hcd);
 	}
 	if (status == 0) {
+		//htc_dbg
+		if (get_radio_flag() & 0x0001)
+			pr_info("%s:set state to USB_STATE_SUSPENDED \n", __func__);
 		usb_set_device_state(rhdev, USB_STATE_SUSPENDED);
 		hcd->state = HC_STATE_SUSPENDED;
 	} else {
@@ -2528,6 +2584,8 @@ void usb_remove_hcd(struct usb_hcd *hcd)
 {
 	struct usb_device *rhdev = hcd->self.root_hub;
 
+	pr_info("+%s\n", __func__);
+
 	dev_info(hcd->self.controller, "remove, state %x\n", hcd->state);
 
 	usb_get_dev(rhdev);
@@ -2547,6 +2605,7 @@ void usb_remove_hcd(struct usb_hcd *hcd)
 #endif
 
 	mutex_lock(&usb_bus_list_lock);
+	pr_info("+%s:usb_disconnect\n", __func__);
 	usb_disconnect(&rhdev);		/* Sets rhdev to NULL */
 	mutex_unlock(&usb_bus_list_lock);
 
@@ -2572,8 +2631,11 @@ void usb_remove_hcd(struct usb_hcd *hcd)
 	}
 
 	usb_put_dev(hcd->self.root_hub);
+	pr_info("+%s:usb_deregister_bus\n", __func__);
 	usb_deregister_bus(&hcd->self);
 	hcd_buffer_destroy(hcd);
+
+	pr_info("-%s\n", __func__);
 }
 EXPORT_SYMBOL_GPL(usb_remove_hcd);
 

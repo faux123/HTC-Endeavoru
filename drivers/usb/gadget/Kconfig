@@ -178,6 +178,17 @@ config USB_OMAP
 	   dynamically linked module called "omap_udc" and force all
 	   gadget drivers to also be dynamically linked.
 
+config USB_TEGRA
+	tristate "Nvidia Highspeed USB 2.0 device controller"
+	depends on ARCH_TEGRA
+	select USB_GADGET_DUALSPEED
+	help
+	   Enables TEGRA USB 2.0 pheripheral driver.
+
+	   Say "y" to link the driver statically, or "m" to build a
+	   dynamically linked module called "tegra_udc" and force all
+	   gadget drivers to also be dynamically linked.
+
 config USB_PXA25X
 	tristate "PXA 25x or IXP 4xx"
 	depends on (ARCH_PXA && PXA25x) || ARCH_IXP4XX
@@ -823,6 +834,148 @@ config USB_G_PRINTER
 	  For more information, see Documentation/usb/gadget_printer.txt
 	  which includes sample code for accessing the device file.
 
+config USB_G_ANDROID
+	boolean "Android Gadget"
+	depends on SWITCH
+	help
+	  The Android gadget driver supports multiple USB functions.
+	  The functions can be configured via a board file and may be
+	  enabled and disabled dynamically.
+
+config USB_ANDROID_ADB
+	boolean "Android gadget adb function"
+	depends on USB_G_ANDROID
+	default y
+	help
+	  Provides adb function for android gadget driver.
+
+config USB_ANDROID_DIAG
+	boolean "USB MSM7K Diag Function"
+	depends on USB_G_ANDROID
+	default n
+	help
+	  Qualcomm diagnostics interface support.
+
+config USB_ANDROID_MDM9K_DIAG
+        boolean "USB MDM 9k Diag Function"
+        depends on USB_G_ANDROID
+        help
+          Qualcomm diagnostics interface support for 9K.
+
+config USB_ANDROID_MDM9K_MODEM
+        boolean "USB MDM 9k Modem Function"
+        depends on USB_G_ANDROID
+        help
+          Qualcomm Modem interface support for 9K.
+
+config USB_ANDROID_MASS_STORAGE
+	boolean "Android gadget mass storage function"
+	depends on USB_G_ANDROID && SWITCH
+	default y
+	help
+	  Provides USB mass storage function for android gadget driver.
+config USB_2A_CHARGER_DETECT
+	boolean "Android 2A charger detect function"
+	depends on USB_G_ANDROID
+	help
+	  Provides 2A charger detect.
+
+config USB_ANDROID_MTP
+	boolean "Android MTP function"
+	depends on USB_G_ANDROID
+	help
+	  Provides Media Transfer Protocol (MTP) support for android gadget driver.
+
+config USB_ANDROID_RNDIS
+	boolean "Android gadget RNDIS ethernet function"
+	depends on USB_G_ANDROID
+	default n
+	help
+	  Provides RNDIS ethernet function for android gadget driver.
+
+config USB_ANDROID_RMNET
+	boolean "RmNet function driver"
+	depends on USB_G_ANDROID
+	default n
+	help
+	  Enabling this option adds rmnet support to the
+	  android gadget. Rmnet is an alternative to CDC-ECM
+	  and Windows RNDIS. It uses QUALCOMM MSM Interface
+	  for control transfers. It acts like a bridge between
+	  Host and modem found in MSM chipsets.
+
+
+config USB_F_SERIAL
+	boolean "generic serial function driver"
+	depends on USB_G_ANDROID
+	default n
+	help
+	  Say "y" to link the driver statically, or "m" to build
+	  as a part of "g_android"
+
+config MODEM_SUPPORT
+	boolean "modem support in generic serial function driver"
+	depends on USB_G_ANDROID
+	default n
+	help
+          This feature enables the modem functionality in the
+	  generic serial.
+	  adds interrupt endpoint support to send modem notifications
+	  to host.
+	  adds CDC descriptors to enumerate the generic serial as MODEM.
+	  adds CDC class requests to configure MODEM line settings.
+	  Say "y" to enable MODEM support in the generic serial driver.
+
+config USB_ANDROID_SERIAL
+	boolean "Android gadget Serial function"
+	depends on USB_G_ANDROID
+	help
+
+config USB_ANDROID_PROJECTOR
+	boolean "Android gadget Projector function"
+	depends on USB_G_ANDROID
+	help
+
+config USB_ANDROID_PROJECTOR_HTC_MODE
+	boolean "Android gadget Projector HTC MODE function"
+	depends on USB_ANDROID_PROJECTOR
+	help
+
+config USB_ANDROID_ECM
+	boolean "Android gadget ECM function"
+	depends on USB_G_ANDROID
+	help
+
+config USB_F_SERIAL_SDIO
+	boolean "generic serial function driver over SDIO"
+	depends on USB_G_ANDROID && MSM_SDIO_CMUX && MSM_SDIO_AL
+	default n
+	help
+          Gadget serial driver is one way to communicate with modem
+          device. This option enables serial driver to communicate
+          to modem device using sdio. It makes very minimal changes
+          to Gadget usb serial interface(f_serial.c) and adds
+          separate transport layer u_sdio(very similar to u_serial.c)
+          Say "y" to link the driver staticall
+
+config USB_F_SERIAL_SMD
+	boolean "generic serial function driver over SMD"
+	depends on USB_G_ANDROID && MSM_SMD
+	default n
+	help
+          Gadget serial driver is one way to communicate with modem
+          device. This option enables serial driver to communicate
+          to modem device using smd. It makes very minimal changes
+          to Gadget usb serial interface(f_serial.c) and adds
+          separate transport layer u_smd(very similar to u_serial.c)
+          Say "y" to link the driver statically
+
+config USB_ANDROID_USBNET
+	boolean "Android gadget USBNET function for VoIP"
+	depends on USB_G_ANDROID
+	default n
+	help
+
 config USB_CDC_COMPOSITE
 	tristate "CDC Composite Device (Ethernet and ACM)"
 	depends on NET
@@ -943,5 +1096,24 @@ config USB_G_WEBCAM
 	  dynamically linked module called "g_webcam".
 
 endchoice
+
+config USB_CSW_HACK
+	boolean "USB Mass storage csw hack Feature"
+	default n
+	help
+	 This csw hack feature is for increasing the performance of the mass
+	 storage
+
+config USB_MSC_PROFILING
+	bool "USB MSC performance profiling"
+	help
+	  If you say Y here, support will be added for collecting
+	  Mass-storage performance numbers at the VFS level.
+
+
+config USB_GADGET_VERIZON_PRODUCT_ID
+	boolean "Verizon Product ID Mapping"
+	depends on USB_G_ANDROID
+	default n
 
 endif # USB_GADGET

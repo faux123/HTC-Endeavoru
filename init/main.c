@@ -359,6 +359,9 @@ static noinline void __init_refok rest_init(void)
 {
 	int pid;
 
+    /* let kthreadd run immediately in RT priority */
+    const struct sched_param param = { .sched_priority = 1 };
+
 	rcu_scheduler_starting();
 	/*
 	 * We need to spawn init first so that it obtains pid 1, however
@@ -371,6 +374,7 @@ static noinline void __init_refok rest_init(void)
 	rcu_read_lock();
 	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
+    sched_setscheduler_nocheck(kthreadd_task, SCHED_FIFO, &param);
 	complete(&kthreadd_done);
 
 	/*

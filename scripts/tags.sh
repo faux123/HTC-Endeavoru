@@ -5,7 +5,7 @@
 # mode may be any of: tags, TAGS, cscope
 #
 # Uses the following environment variables:
-# ARCH, SUBARCH, SRCARCH, srctree, src, obj
+# ARCH, SUBARCH, SRCARCH, srctree, src, obj, MACH
 
 if [ "$KBUILD_VERBOSE" = "1" ]; then
 	set -x
@@ -16,6 +16,13 @@ ignore="( -name SCCS -o -name BitKeeper -o -name .svn -o \
           -name CVS  -o -name .pc       -o -name .hg  -o \
           -name .git )                                   \
           -prune -o"
+
+if [ -n "$MACH" ]; then
+	ignore+=" \
+		( ( -path *mach-* -o -path *plat-* ) -a \
+		! -path *$MACH* ) \
+		-prune -o"
+fi
 
 # Do not use full path if we do not use O=.. builds
 # Use make O=. {tags|cscope}

@@ -59,6 +59,7 @@
 
 #include <net/arp.h>
 #include <net/ip.h>
+#include <net/tcp.h>
 #include <net/route.h>
 #include <net/ip_fib.h>
 #include <net/rtnetlink.h>
@@ -735,6 +736,7 @@ int devinet_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 	case SIOCSIFBRDADDR:	/* Set the broadcast address */
 	case SIOCSIFDSTADDR:	/* Set the destination address */
 	case SIOCSIFNETMASK: 	/* Set the netmask for the interface */
+	case SIOCKILLADDR:	/* Nuke all sockets on this address */
 		ret = -EACCES;
 		if (!capable(CAP_NET_ADMIN))
 			goto out;
@@ -786,7 +788,8 @@ int devinet_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 	}
 
 	ret = -EADDRNOTAVAIL;
-	if (!ifa && cmd != SIOCSIFADDR && cmd != SIOCSIFFLAGS)
+	if (!ifa && cmd != SIOCSIFADDR && cmd != SIOCSIFFLAGS
+	    && cmd != SIOCKILLADDR)
 		goto done;
 
 	switch (cmd) {
@@ -912,6 +915,9 @@ int devinet_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 			inet_insert_ifa(ifa);
 		}
 		break;
+	case SIOCKILLADDR:	/* Nuke all connections on this address */
+		ret = tcp_nuke_addr(net, (struct sockaddr *) sin);
+		break;
 	}
 done:
 	rtnl_unlock();
@@ -968,9 +974,14 @@ __be32 inet_select_addr(const struct net_device *dev, __be32 dst, int scope)
 	struct in_device *in_dev;
 	struct net *net = dev_net(dev);
 
+	if ((IS_ERR(dev)) || (!dev)) {
+		printk("[NET] dev is NULL in %s\n", __func__);
+		return addr;
+	}
+
 	rcu_read_lock();
 	in_dev = __in_dev_get_rcu(dev);
-	if (!in_dev)
+	if (IS_ERR(in_dev) || (!in_dev))
 		goto no_in_dev;
 
 	for_primary_ifa(in_dev) {

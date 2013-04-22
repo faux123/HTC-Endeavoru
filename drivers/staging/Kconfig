@@ -66,6 +66,8 @@ source "drivers/staging/rts_pstor/Kconfig"
 
 source "drivers/staging/frontier/Kconfig"
 
+source "drivers/staging/android/Kconfig"
+
 source "drivers/staging/pohmelfs/Kconfig"
 
 source "drivers/staging/phison/Kconfig"
@@ -147,6 +149,8 @@ source "drivers/staging/gma500/Kconfig"
 source "drivers/staging/altera-stapl/Kconfig"
 
 source "drivers/staging/mei/Kconfig"
+
+source "drivers/staging/ti-st/Kconfig"
 
 source "drivers/staging/nvec/Kconfig"
 

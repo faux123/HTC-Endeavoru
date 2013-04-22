@@ -152,6 +152,7 @@ extern void arch_suspend_disable_irqs(void);
 extern void arch_suspend_enable_irqs(void);
 
 extern int pm_suspend(suspend_state_t state);
+extern bool is_resume_from_deep_suspend(void);
 #else /* !CONFIG_SUSPEND */
 #define suspend_valid_only_mem	NULL
 

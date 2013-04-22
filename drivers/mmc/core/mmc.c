@@ -4,6 +4,7 @@
  *  Copyright (C) 2003-2004 Russell King, All Rights Reserved.
  *  Copyright (C) 2005-2007 Pierre Ossman, All Rights Reserved.
  *  MMCv4 support Copyright (C) 2006 Philip Langdale, All Rights Reserved.
+ *  Copyright (c) 2012 NVIDIA Corporation, All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -16,11 +17,18 @@
 #include <linux/mmc/host.h>
 #include <linux/mmc/card.h>
 #include <linux/mmc/mmc.h>
-
+#include <linux/android_alarm.h>
 #include "core.h"
 #include "bus.h"
 #include "mmc_ops.h"
 #include "sd_ops.h"
+
+
+extern int htc_mmc_bkops_flag;
+u64 bkops_end;
+extern u64 bkops_start;
+extern int htc_mmc_needs_bkops;
+
 
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
@@ -403,10 +411,33 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			ext_csd[EXT_CSD_TRIM_MULT];
 	}
 
-	if (card->ext_csd.rev >= 5)
-		card->ext_csd.rel_param = ext_csd[EXT_CSD_WR_REL_PARAM];
-
 	card->ext_csd.raw_erased_mem_count = ext_csd[EXT_CSD_ERASED_MEM_CONT];
+	if (card->ext_csd.rev >= 5) {
+		card->ext_csd.rel_param = ext_csd[EXT_CSD_WR_REL_PARAM];
+		/* check whether the eMMC card supports HPI */
+		if (ext_csd[EXT_CSD_HPI_FEATURES] & 0x1) {
+			card->ext_csd.hpi = 1;
+			if (ext_csd[EXT_CSD_HPI_FEATURES] & 0x2)
+				card->ext_csd.hpi_cmd = MMC_STOP_TRANSMISSION;
+			else
+				card->ext_csd.hpi_cmd = MMC_SEND_STATUS;
+			/*
+			 * Indicate the maximum timeout to close
+			 * a command interrupted by HPI
+			 */
+			card->ext_csd.out_of_int_time =
+				ext_csd[EXT_CSD_OUT_OF_INTERRUPT_TIME] * 10;
+		}
+
+		/* Check whether the eMMC card supports background ops */
+		if (ext_csd[EXT_CSD_BKOPS_SUPPORT] & 0x1)
+			card->ext_csd.bk_ops = 1;
+	}
+
+	/* eMMC v4.5 or later */
+	if (card->ext_csd.rev >= 6)
+		card->ext_csd.feature_support |= MMC_DISCARD_FEATURE;
+
 	if (ext_csd[EXT_CSD_ERASED_MEM_CONT])
 		card->erased_byte = 0xFF;
 	else
@@ -550,6 +581,22 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 	BUG_ON(!host);
 	WARN_ON(!host->claimed);
 
+       if (oldcard && host->index == 0 && htc_mmc_bkops_flag) {
+               bkops_end = ktime_to_ms(ktime_get_real());
+
+               if (bkops_end > bkops_start)
+                       htc_mmc_needs_bkops -= (int)(bkops_end - bkops_start);
+
+               if (htc_mmc_needs_bkops < 0)
+                       htc_mmc_needs_bkops = 0;
+
+		mmc_card_clr_doing_bkops(oldcard);
+		mmc_card_clr_need_bkops(oldcard);
+                htc_mmc_bkops_flag = 0;
+       }
+
+
+
 	/*
 	 * Since we're changing the OCR value, we seem to
 	 * need to tell some cards to go back to the idle
@@ -664,11 +711,17 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 		mmc_set_erase_size(card);
 	}
 
+	if (card) {
+		card->ext_csd.raw_bkops_status = 0;
+		card->ext_csd.bkops_urgent_checking =0;
+	}
 	/*
 	 * If enhanced_area_en is TRUE, host needs to enable ERASE_GRP_DEF
 	 * bit.  This bit will be lost every time after a reset or power off.
 	 */
+#ifdef DO_NOT_WORKAROUND_SANDISK_BUG
 	if (card->ext_csd.enhanced_area_en) {
+#endif
 		err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
 				 EXT_CSD_ERASE_GROUP_DEF, 1, 0);
 
@@ -693,7 +746,9 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 			 */
 			mmc_set_erase_size(card);
 		}
+#ifdef DO_NOT_WORKAROUND_SANDISK_BUG
 	}
+#endif
 
 	/*
 	 * Ensure eMMC user default partition is enabled
@@ -724,6 +779,41 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 		} else {
 			mmc_card_set_highspeed(card);
 			mmc_set_timing(card->host, MMC_TIMING_MMC_HS);
+		}
+	}
+
+	/*
+	 * Enable HPI feature (if supported)
+	 */
+	if (card->ext_csd.hpi && (card->host->caps & MMC_CAP_BKOPS)) {
+		err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			EXT_CSD_HPI_MGMT, 1, 0);
+		if (err && err != -EBADMSG)
+			goto free_card;
+		if (err) {
+			pr_warning("%s: Enabling HPI failed\n",
+				   mmc_hostname(card->host));
+			err = 0;
+		} else {
+			card->ext_csd.hpi_en = 1;
+		}
+	}
+
+	/*
+	 * Enable Background ops feature (if supported)
+	 */
+	if (card->ext_csd.bk_ops && (card->host->caps & MMC_CAP_BKOPS)) {
+		err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			EXT_CSD_BKOPS_EN, 1, 0);
+
+		if (err && err != -EBADMSG)
+			goto free_card;
+		if (err) {
+			pr_warning("%s: Enabling BK ops failed\n",
+				   mmc_hostname(card->host));
+			err = 0;
+		} else {
+			card->ext_csd.bk_ops_en = 1;
 		}
 	}
 
@@ -840,6 +930,53 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 			mmc_set_timing(card->host, MMC_TIMING_UHS_DDR50);
 			mmc_set_bus_width(card->host, bus_width);
 		}
+	}
+
+	if (card->cid.manfid == 0x45) {
+		/* Sandisk 24nm extreme 16G */
+		if ((card->ext_csd.sectors == 31105024) && !strcmp(card->cid.prod_name, "SEM16G"))
+			card->wr_perf = 12;
+		/* Sandisk 24nm extreme 32G */
+		else if ((card->ext_csd.sectors == 62324736) && !strcmp(card->cid.prod_name, "SEM32G"))
+			card->wr_perf = 12;
+		/* Sandisk 24nm extreme 64G */
+		else if ((card->ext_csd.sectors == 122617856) && !strcmp(card->cid.prod_name, "SEM64G"))
+			card->wr_perf = 12;
+		/* Sandisk 19nm extreme 16G */
+		else if ((card->ext_csd.sectors == 30777344) && !strcmp(card->cid.prod_name, "SEM16G"))
+			card->wr_perf = 14;
+		/* Sandisk 19nm extreme 32G */
+		else if ((card->ext_csd.sectors == 61071360) && !strcmp(card->cid.prod_name, "SEM32G"))
+			card->wr_perf = 14;
+		else
+			card->wr_perf = 11;
+	} else if (card->cid.manfid == 0x15) {
+		/* Samsung 27nm 16G */
+		if ((card->ext_csd.sectors == 30777344) && !strcmp(card->cid.prod_name, "KYL00M"))
+			card->wr_perf = 11;
+		/* Samsung 27nm 32G */
+		else if ((card->ext_csd.sectors == 62521344) && !strcmp(card->cid.prod_name, "MBG8FA"))
+			card->wr_perf = 11;
+		/* Samsung 21nm 16G */
+		else if ((card->ext_csd.sectors == 30535680) && !strcmp(card->cid.prod_name, "MAG2GA"))
+			card->wr_perf = 14;
+		/* Samsung 21nm 64G */
+		else if (card->ext_csd.sectors == 122142720)
+			card->wr_perf = 14;
+		else
+			card->wr_perf = 11;
+	} else if (card->cid.manfid == 0x90) {
+		/* Hynix 20nm 16G */
+		if ((card->ext_csd.sectors == 30785536) && !strncmp(card->cid.prod_name, "HAG4d", 5))
+			card->wr_perf = 12;
+		/* Hynix 20nm 32G */
+		else if ((card->ext_csd.sectors == 61079552) && !strncmp(card->cid.prod_name, "HAG4d", 5))
+			card->wr_perf = 12;
+		/* Hynix 20nm 64G */
+		else if ((card->ext_csd.sectors == 122159104) && !strncmp(card->cid.prod_name, "HAG4d", 5))
+			card->wr_perf = 12;
+		else
+			card->wr_perf = 11;
 	}
 
 	if (!oldcard)

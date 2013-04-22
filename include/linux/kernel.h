@@ -384,6 +384,106 @@ static inline char *pack_hex_byte(char *buf, u8 byte)
 extern int hex_to_bin(char ch);
 extern void hex2bin(u8 *dst, const char *src, size_t count);
 
+/* ==== additional macro to define [tag] kernel logs. ==== */
+#ifdef DEBUG
+#define pr_tag_fmt(level, tag, fmt, ...) \
+		printk (level "[" tag "] " KBUILD_MODNAME ":%s():%d: " fmt, \
+				__func__, __LINE__, ##__VA_ARGS__);
+#else
+#define pr_tag_fmt(level, tag, fmt, ...) \
+		printk (level "[" tag "] " fmt, ##__VA_ARGS__);
+#endif
+
+#define pr_tag_emerg(tag, fmt, ...) \
+		pr_tag_fmt(KERN_EMERG, tag, fmt, ##__VA_ARGS__);
+#define pr_tag_alert(tag, fmt, ...) \
+		pr_tag_fmt(KERN_ALERT, tag, fmt, ##__VA_ARGS__);
+#define pr_tag_crit(tag, fmt, ...) \
+		pr_tag_fmt(KERN_CRIT, tag, fmt, ##__VA_ARGS__);
+#define pr_tag_err(tag, fmt, ...) \
+		pr_tag_fmt(KERN_ERR, tag, fmt, ##__VA_ARGS__);
+#define pr_tag_warn(tag, fmt, ...) \
+		pr_tag_fmt(KERN_WARNING, tag, fmt, ##__VA_ARGS__);
+#define pr_tag_info(tag, fmt, ...) \
+		pr_tag_fmt(KERN_INFO, tag, fmt, ##__VA_ARGS__);
+#define pr_tag_cont(tag, fmt, ...) \
+		pr_tag_fmt(KERN_CONT, tag, fmt, ##__VA_ARGS__);
+#ifdef DEBUG
+#define pr_tag_dbg(tag, fmt, ...) \
+	pr_tag_fmt(KERN_DEBUG, tag, fmt, ##__VA_ARGS__);
+#else
+#define pr_tag_dbg(tag, fmt, ...) \
+    ({ if (0) pr_tag_fmt(KERN_DEBUG, tag, fmt, ##__VA_ARGS__); 0; })
+#endif
+/* ===================================================== */
+
+#ifndef pr_fmt
+#define pr_fmt(fmt) fmt
+#endif
+
+#define pr_emerg(fmt, ...) \
+        printk(KERN_EMERG pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_alert(fmt, ...) \
+        printk(KERN_ALERT pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_crit(fmt, ...) \
+        printk(KERN_CRIT pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_err(fmt, ...) \
+        printk(KERN_ERR pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_warning(fmt, ...) \
+        printk(KERN_WARNING pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_warn pr_warning
+#define pr_notice(fmt, ...) \
+        printk(KERN_NOTICE pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_info(fmt, ...) \
+        printk(KERN_INFO pr_fmt(fmt), ##__VA_ARGS__)
+#define pr_cont(fmt, ...) \
+	printk(KERN_CONT fmt, ##__VA_ARGS__)
+
+#define BTHP_INFO_TAG "[BTHP] "
+#define pr_bthp_info(fmt, ...) \
+		pr_info(BTHP_INFO_TAG pr_fmt(fmt), ##__VA_ARGS__)
+
+#define PWR_STORY_TAG "[PWR_STORY]"
+#define PWR_DEVICE_TAG "----"
+#define pr_pwr_story(fmt, ...) \
+		pr_info(PWR_STORY_TAG "[" PWR_DEVICE_TAG "]" pr_fmt(fmt) "\n", ##__VA_ARGS__)
+#define pr_device_power_on() \
+		pr_pwr_story(" Turn on")
+#define pr_device_power_off() \
+		pr_pwr_story(" Turn off")
+#define pr_device_clk_on() \
+		pr_pwr_story("+clk")
+#define pr_device_clk_off() \
+		pr_pwr_story("-clk")
+
+#define pr_data_processing(tag, on, type, var, unit) \
+		pr_pwr_story("%s%s, %s, %d%s", on, tag, type, var, unit)
+#define pr_data_tx_start(type, pwr_consumption, unit) \
+		pr_data_processing("Tx", "+", type, pwr_consumption, unit)
+#define pr_data_tx_end(type, data_size) \
+		pr_data_processing("Tx", "-", type, data_size, "bytes")
+#define pr_data_rx_start(type, pwr_consumption, unit) \
+		pr_data_processing("Rx", "+", type, pwr_consumption, unit)
+#define pr_data_rx_end(type, data_size) \
+		pr_data_processing("Rx", "-", type, data_size, "bytes")
+#define pr_data_cn_start(type, pwr_consumption, unit) \
+		pr_data_processing("Cn", "+", type, pwr_consumption, unit)
+#define pr_data_cn_end(type, data_size) \
+		pr_data_processing("Cn", "-", type, data_size, "bytes")
+#define pr_data_encode_start(type, pwr_consumption, unit) \
+		pr_data_processing("Encoding", "+", type, pwr_consumption, unit)
+#define pr_data_encode_end(type, data_size) \
+		pr_data_processing("Encoding", "-", type, data_size, "bytes")
+#define pr_data_decode_start(type, pwr_consumption, unit) \
+		pr_data_processing("Decoding", "+", type, pwr_consumption, unit)
+#define pr_data_decode_end(type, data_size) \
+		pr_data_processing("Decoding", "-", type, data_size, "bytes")
+
+#define pr_mode_enter(mode, pwr_consumption, unit) \
+		pr_pwr_story("+%s mode, %d%s", mode, pwr_consumption, unit)
+#define pr_mode_exit(mode) \
+		pr_pwr_story("-%s mode", mode)
+
 /*
  * General tracing related utility functions - trace_printk(),
  * tracing_on/tracing_off and tracing_start()/tracing_stop
@@ -743,5 +843,8 @@ struct sysinfo {
 	unsigned int mem_unit;		/* Memory unit size in bytes */
 	char _f[20-2*sizeof(long)-sizeof(int)];	/* Padding: libc5 uses this.. */
 };
+
+/* To identify board information in panic logs, set this */
+extern char *mach_panic_string;
 
 #endif

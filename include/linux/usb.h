@@ -184,6 +184,13 @@ struct usb_interface {
 	struct device dev;		/* interface specific device info */
 	struct device *usb_dev;
 	atomic_t pm_usage_cnt;		/* usage counter for autosuspend */
+//--------------------------------------------------------
+#ifdef CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+	unsigned long	last_busy_jiffies;
+	unsigned int	busy_cnt;
+	unsigned int	data_busy_cnt;
+#endif	//CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+//--------------------------------------------------------
 	struct work_struct reset_ws;	/* for resets in atomic context */
 };
 #define	to_usb_interface(d) container_of(d, struct usb_interface, dev)
@@ -489,6 +496,12 @@ struct usb_device {
 	unsigned do_remote_wakeup:1;
 	unsigned reset_resume:1;
 #endif
+//--------------------------------------------------------
+#ifdef CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+	unsigned auto_suspend_timer_set:1;
+	unsigned is_suspend:1;
+#endif	//CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+//--------------------------------------------------------
 	struct wusb_dev *wusb_dev;
 	int slot_id;
 };
@@ -530,6 +543,19 @@ static inline void usb_mark_last_busy(struct usb_device *udev)
 {
 	pm_runtime_mark_last_busy(&udev->dev);
 }
+
+//--------------------------------------------------------
+#ifdef CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+static inline void usb_mark_intf_last_busy(struct usb_interface *intf, bool is_data)
+{
+	//dev_info(&intf->dev, "%s\n", __func__);
+	ACCESS_ONCE(intf->last_busy_jiffies) = jiffies;
+	(intf->busy_cnt)++;
+	if (is_data)
+		(intf->data_busy_cnt)++;
+}
+#endif	//CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+//--------------------------------------------------------
 
 #else
 

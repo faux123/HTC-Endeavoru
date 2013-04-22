@@ -25,6 +25,7 @@
 
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/host.h>
+#include <linux/mmc/card.h>
 
 #include "sdhci.h"
 
@@ -48,6 +49,9 @@ static void sdhci_send_command(struct sdhci_host *, struct mmc_command *);
 static void sdhci_finish_command(struct sdhci_host *);
 static int sdhci_execute_tuning(struct mmc_host *mmc);
 static void sdhci_tuning_timer(unsigned long data);
+
+
+
 
 static void sdhci_dumpregs(struct sdhci_host *host)
 {
@@ -1046,14 +1050,11 @@ static void sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 	u16 clk = 0;
 	unsigned long timeout;
 
-	if (clock == host->clock)
+	if (clock && clock == host->clock)
 		return;
 
-	if (host->ops->set_clock) {
-		host->ops->set_clock(host, clock);
-		if (host->quirks & SDHCI_QUIRK_NONSTANDARD_CLOCK)
-			return;
-	}
+	if (host->quirks & SDHCI_QUIRK_NONSTANDARD_CLOCK)
+		return;
 
 	sdhci_writew(host, 0, SDHCI_CLOCK_CONTROL);
 
@@ -1136,12 +1137,27 @@ static void sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 out:
 	host->clock = clock;
 }
-
+// HTC_WIFI_START
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+static int wifi_is_on = 0;
+extern int endeavor_wifi_power(int on);
+void set_wifi_is_on (int on){
+    wifi_is_on = on;
+}
+EXPORT_SYMBOL(set_wifi_is_on);
+#endif
+// HTC_WIFI_END
 static void sdhci_set_power(struct sdhci_host *host, unsigned short power)
 {
 	u8 pwr = 0;
 
 	if (power != (unsigned short)-1) {
+		// HTC_WIFI_START
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+	if(host->mmc->index==1)
+		endeavor_wifi_power(1);
+#endif
+		// HTC_WIFI_END
 		switch (1 << power) {
 		case MMC_VDD_165_195:
 			pwr = SDHCI_POWER_180;
@@ -1157,6 +1173,14 @@ static void sdhci_set_power(struct sdhci_host *host, unsigned short power)
 		default:
 			BUG();
 		}
+	}
+	else {
+		// HTC_WIFI_START
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+		if(host->mmc->index==1)
+			endeavor_wifi_power(0);
+#endif
+		// HTC_WIFI_END
 	}
 
 	if (host->pwr == pwr)
@@ -1231,14 +1255,27 @@ static void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	host->mrq = mrq;
 
 	/* If polling, assume that the card is always present. */
-	if (host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION)
-		present = true;
-	else
+	if (host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION) {
+		if (host->ops->get_cd)
+			present = host->ops->get_cd(host);
+		else
+			present = true;
+	} else {
 		present = sdhci_readl(host, SDHCI_PRESENT_STATE) &
 				SDHCI_CARD_PRESENT;
+	}
 
 	if (!present || host->flags & SDHCI_DEVICE_DEAD) {
 		host->mrq->cmd->error = -ENOMEDIUM;
+		/* +++ 2011-10-25 Tommy Chen */
+		if (!present)
+			printk(KERN_INFO "%s: card is not present\n",
+				mmc_hostname(mmc));
+
+		if (host->flags & SDHCI_DEVICE_DEAD)
+			printk(KERN_ERR "%s: host is dead\n",
+				mmc_hostname(mmc));
+		/* --- */
 		tasklet_schedule(&host->finish_tasklet);
 	} else {
 		u32 present_state;
@@ -1277,6 +1314,20 @@ static void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	host = mmc_priv(mmc);
 
+	/*
+	 * Controller registers should not be updated without the
+	 * controller clock enabled. Set the minimum controller
+	 * clock if there is no clock.
+	 */
+	if (host->ops->set_clock) {
+		if (!host->clock && !ios->clock) {
+			host->ops->set_clock(host, host->mmc->f_min);
+			host->clock = host->mmc->f_min;
+		} else if (ios->clock && (ios->clock != host->clock)) {
+			host->ops->set_clock(host, ios->clock);
+		}
+	}
+
 	spin_lock_irqsave(&host->lock, flags);
 
 	if (host->flags & SDHCI_DEVICE_DEAD)
@@ -1291,12 +1342,12 @@ static void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		sdhci_reinit(host);
 	}
 
-	sdhci_set_clock(host, ios->clock);
-
 	if (ios->power_mode == MMC_POWER_OFF)
 		sdhci_set_power(host, -1);
 	else
 		sdhci_set_power(host, ios->vdd);
+
+	sdhci_set_clock(host, ios->clock);
 
 	if (host->ops->platform_send_init_74_clocks)
 		host->ops->platform_send_init_74_clocks(host, ios->power_mode);
@@ -1336,14 +1387,14 @@ static void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	if (host->version >= SDHCI_SPEC_300) {
 		u16 clk, ctrl_2;
-		unsigned int clock;
 
 		/* In case of UHS-I modes, set High Speed Enable */
-		if ((ios->timing == MMC_TIMING_UHS_SDR50) ||
+		if (((ios->timing == MMC_TIMING_UHS_SDR50) ||
 		    (ios->timing == MMC_TIMING_UHS_SDR104) ||
 		    (ios->timing == MMC_TIMING_UHS_DDR50) ||
 		    (ios->timing == MMC_TIMING_UHS_SDR25) ||
 		    (ios->timing == MMC_TIMING_UHS_SDR12))
+		    && !(host->quirks & SDHCI_QUIRK_NO_HISPD_BIT))
 			ctrl |= SDHCI_CTRL_HISPD;
 
 		ctrl_2 = sdhci_readw(host, SDHCI_HOST_CONTROL2);
@@ -1376,9 +1427,9 @@ static void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 			sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
 
 			/* Re-enable SD Clock */
-			clock = host->clock;
-			host->clock = 0;
-			sdhci_set_clock(host, clock);
+			clk = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
+			clk |= SDHCI_CLOCK_CARD_EN;
+			sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL);
 		}
 
 
@@ -1407,9 +1458,9 @@ static void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		}
 
 		/* Re-enable SD Clock */
-		clock = host->clock;
-		host->clock = 0;
-		sdhci_set_clock(host, clock);
+		clk = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
+		clk |= SDHCI_CLOCK_CARD_EN;
+		sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL);
 	} else
 		sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
 
@@ -1424,6 +1475,12 @@ static void sdhci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 out:
 	mmiowb();
 	spin_unlock_irqrestore(&host->lock, flags);
+	/*
+	 * Controller clock should only be disabled after all the register
+	 * writes are done.
+	 */
+	if (!ios->clock && host->ops->set_clock)
+		host->ops->set_clock(host, ios->clock);
 }
 
 static int check_ro(struct sdhci_host *host)
@@ -1510,6 +1567,12 @@ static int sdhci_start_signal_voltage_switch(struct mmc_host *mmc,
 	if (host->version < SDHCI_SPEC_300)
 		return 0;
 
+	if (host->quirks & SDHCI_QUIRK_NON_STD_VOLTAGE_SWITCHING) {
+		if (host->ops->switch_signal_voltage)
+			return host->ops->switch_signal_voltage(
+				host, ios->signal_voltage);
+	}
+
 	/*
 	 * We first check whether the request is to set signalling voltage
 	 * to 3.3V. If so, we change the voltage to 3.3V and return quickly.
@@ -1552,7 +1615,6 @@ static int sdhci_start_signal_voltage_switch(struct mmc_host *mmc,
 
 			/* Wait for 5ms */
 			usleep_range(5000, 5500);
-
 			ctrl = sdhci_readw(host, SDHCI_HOST_CONTROL2);
 			if (ctrl & SDHCI_CTRL_VDD_180) {
 				/* Provide SDCLK again and wait for 1ms*/
@@ -1608,6 +1670,14 @@ static int sdhci_execute_tuning(struct mmc_host *mmc)
 
 	disable_irq(host->irq);
 	spin_lock(&host->lock);
+
+	if ((host->quirks & SDHCI_QUIRK_NON_STANDARD_TUNING) &&
+		host->ops->execute_freq_tuning) {
+		err = host->ops->execute_freq_tuning(host);
+		spin_unlock(&host->lock);
+		enable_irq(host->irq);
+		return err;
+	}
 
 	ctrl = sdhci_readw(host, SDHCI_HOST_CONTROL2);
 
@@ -1782,6 +1852,16 @@ static void sdhci_enable_preset_value(struct mmc_host *mmc, bool enable)
 	if (host->version < SDHCI_SPEC_300)
 		return;
 
+	/*
+	 * Enabling preset value would make programming clock
+	 * divider ineffective. The controller would use the
+	 * values present in the preset value registers. In
+	 * case of non-standard clock, let the platform driver
+	 * decide whether to enable preset or not.
+	 */
+	if (host->quirks & SDHCI_QUIRK_NONSTANDARD_CLOCK)
+		return;
+
 	spin_lock_irqsave(&host->lock, flags);
 
 	ctrl = sdhci_readw(host, SDHCI_HOST_CONTROL2);
@@ -1801,10 +1881,53 @@ static void sdhci_enable_preset_value(struct mmc_host *mmc, bool enable)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+int sdhci_enable(struct mmc_host *mmc)
+{
+	struct sdhci_host *host = mmc_priv(mmc);
+
+	if (!mmc->card)
+		return 0;
+
+	if (mmc->ios.clock) {
+		if (mmc->card->type != MMC_TYPE_SDIO) {
+			if (host->ops->set_clock)
+				host->ops->set_clock(host, mmc->ios.clock);
+			sdhci_set_clock(host, mmc->ios.clock);
+		} else {
+			if (host->ops->set_card_clock)
+				host->ops->set_card_clock(host, mmc->ios.clock);
+		}
+	}
+
+	return 0;
+}
+
+int sdhci_disable(struct mmc_host *mmc, int lazy)
+{
+	struct sdhci_host *host = mmc_priv(mmc);
+
+	if (!mmc->card)
+		return 0;
+
+	/* For SDIO cards, only disable the card clock. */
+	if (mmc->card->type != MMC_TYPE_SDIO) {
+		sdhci_set_clock(host, 0);
+		if (host->ops->set_clock)
+			host->ops->set_clock(host, 0);
+	} else {
+		if (host->ops->set_card_clock)
+			host->ops->set_card_clock(host, 0);
+	}
+
+	return 0;
+}
+
 static const struct mmc_host_ops sdhci_ops = {
 	.request	= sdhci_request,
 	.set_ios	= sdhci_set_ios,
 	.get_ro		= sdhci_get_ro,
+	.enable		= sdhci_enable,
+	.disable	= sdhci_disable,
 	.enable_sdio_irq = sdhci_enable_sdio_irq,
 	.start_signal_voltage_switch	= sdhci_start_signal_voltage_switch,
 	.execute_tuning			= sdhci_execute_tuning,
@@ -1884,6 +2007,8 @@ static void sdhci_tasklet_finish(unsigned long param)
 			/* This is to force an update */
 			clock = host->clock;
 			host->clock = 0;
+			if (host->ops->set_clock)
+				host->ops->set_clock(host, clock);
 			sdhci_set_clock(host, clock);
 		}
 
@@ -1920,6 +2045,9 @@ static void sdhci_timeout_timer(unsigned long data)
 		printk(KERN_ERR "%s: Timeout waiting for hardware "
 			"interrupt.\n", mmc_hostname(host->mmc));
 		sdhci_dumpregs(host);
+
+		if(host->ops && host->ops->dump_irq_reg)
+			host->ops->dump_irq_reg(host);
 
 		if (host->data) {
 			host->data->error = -ETIMEDOUT;
@@ -1961,6 +2089,7 @@ static void sdhci_tuning_timer(unsigned long data)
 static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 {
 	BUG_ON(intmask == 0);
+	int opcode;
 
 	if (!host->cmd) {
 		printk(KERN_ERR "%s: Got command interrupt 0x%08x even "
@@ -1970,11 +2099,36 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 		return;
 	}
 
-	if (intmask & SDHCI_INT_TIMEOUT)
+	opcode = host->cmd->opcode;
+	if (intmask & SDHCI_INT_TIMEOUT) {
+                if (host->mmc->card) {
+                        printk(KERN_ERR "%s: Got cmd intr: TIMEOUT, CMD(%d) ARG(0x%x)\n",
+                                mmc_hostname(host->mmc), host->cmd->opcode, host->cmd->arg);
+                } else {
+					if (host->mmc->index != 1) {
+						if (( host->mmc->index == 2 && (opcode != 1 || opcode != 5 || opcode != 52)) &&
+							( host->mmc->index == 0 && (opcode != 5 || opcode != 8 || opcode != 52 || opcode != 55)))
+                        printk(KERN_INFO "%s: CMD(%d) ARG(0x%x) timed out durning identification mode\n",
+                                mmc_hostname(host->mmc), host->cmd->opcode, host->cmd->arg);
+					}
+                }
 		host->cmd->error = -ETIMEDOUT;
-	else if (intmask & (SDHCI_INT_CRC | SDHCI_INT_END_BIT |
-			SDHCI_INT_INDEX))
+	} else if (intmask & (SDHCI_INT_CRC | SDHCI_INT_END_BIT |
+			SDHCI_INT_INDEX)) {
+		if (intmask & (SDHCI_INT_CRC))
+			printk(KERN_ERR "%s: Got cmd intr: CRC error, CMD(%d)\n",
+				mmc_hostname(host->mmc), host->cmd->opcode);
+
+		if (intmask & (SDHCI_INT_END_BIT))
+			printk(KERN_ERR "%s: Got cmd intr: END_BIT error, CMD(%d)\n",
+				mmc_hostname(host->mmc), host->cmd->opcode);
+
+		if (intmask & (SDHCI_INT_INDEX))
+			printk(KERN_ERR "%s: Got cmd intr: INDEX error, CMD(%d)\n",
+			mmc_hostname(host->mmc), host->cmd->opcode);
+
 		host->cmd->error = -EILSEQ;
+	}
 
 	if (host->cmd->error) {
 		tasklet_schedule(&host->finish_tasklet);
@@ -2071,15 +2225,33 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		return;
 	}
 
-	if (intmask & SDHCI_INT_DATA_TIMEOUT)
+	u32 opcode;
+	u32 argument;
+	if (host->data->mrq) {
+		if (host->data->mrq->cmd) {
+			opcode = host->data->mrq->cmd->opcode;
+			argument = host->data->mrq->cmd->arg;
+		}
+	} else {
+		opcode = 0;
+		argument = 0xffffffff;
+	}
+
+	if (intmask & SDHCI_INT_DATA_TIMEOUT) {
+		printk(KERN_ERR "%s: CMD(%d) ARG(0x%x), DATA_TIMEOUT(%u ns), blksz=%u, blocks=%u\n",
+			mmc_hostname(host->mmc), opcode, argument, host->data->timeout_ns, host->data->blksz, host->data->blocks);
 		host->data->error = -ETIMEDOUT;
-	else if (intmask & SDHCI_INT_DATA_END_BIT)
+	} else if (intmask & SDHCI_INT_DATA_END_BIT) {
+		printk(KERN_ERR "%s: DATA_END_BIT error\n",
+			mmc_hostname(host->mmc));
 		host->data->error = -EILSEQ;
-	else if ((intmask & SDHCI_INT_DATA_CRC) &&
+	} else if ((intmask & SDHCI_INT_DATA_CRC) &&
 		SDHCI_GET_CMD(sdhci_readw(host, SDHCI_COMMAND))
-			!= MMC_BUS_TEST_R)
+			!= MMC_BUS_TEST_R) {
+		printk(KERN_ERR "%s: CMD(%d) ARG(0x%x), DATA_CRC error\n",
+			mmc_hostname(host->mmc), opcode, argument);
 		host->data->error = -EILSEQ;
-	else if (intmask & SDHCI_INT_ADMA_ERROR) {
+	} else if (intmask & SDHCI_INT_ADMA_ERROR) {
 		printk(KERN_ERR "%s: ADMA error\n", mmc_hostname(host->mmc));
 		sdhci_show_adma_error(host);
 		host->data->error = -EIO;
@@ -2239,26 +2411,55 @@ out:
 
 int sdhci_suspend_host(struct sdhci_host *host, pm_message_t state)
 {
-	int ret;
+	int ret = 0;
+	bool has_tuning_timer;
+	struct mmc_host *mmc = host->mmc;
 
 	sdhci_disable_card_detection(host);
 
 	/* Disable tuning since we are suspending */
-	if (host->version >= SDHCI_SPEC_300 && host->tuning_count &&
-	    host->tuning_mode == SDHCI_TUNING_MODE_1) {
+	has_tuning_timer = host->version >= SDHCI_SPEC_300 &&
+		host->tuning_count && host->tuning_mode == SDHCI_TUNING_MODE_1;
+	if (has_tuning_timer) {
 		host->flags &= ~SDHCI_NEEDS_RETUNING;
 		mod_timer(&host->tuning_timer, jiffies +
 			host->tuning_count * HZ);
 	}
 
-	ret = mmc_suspend_host(host->mmc);
-	if (ret)
-		return ret;
+/*HTC_WIFI_START*/
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD)
+	if (mmc->card) { //austin && (mmc->card->type != MMC_TYPE_SDIO))
+#else
+    if (mmc->card && (mmc->card->type != MMC_TYPE_SDIO)) {
+#endif
+/*HTC_WIFI_END*/
 
-	free_irq(host->irq, host);
+
+		ret = mmc_suspend_host(host->mmc);
+		if (ret) {
+			if (has_tuning_timer) {
+				host->flags |= SDHCI_NEEDS_RETUNING;
+				mod_timer(&host->tuning_timer, jiffies +
+						host->tuning_count * HZ);
+			}
+
+			sdhci_enable_card_detection(host);
+
+			return ret;
+		}
+	}
+
+	if (mmc->pm_flags & MMC_PM_KEEP_POWER)
+		host->card_int_set = sdhci_readl(host, SDHCI_INT_ENABLE) &
+			SDHCI_INT_CARD_INT;
+
+	sdhci_mask_irqs(host, SDHCI_INT_ALL_MASK);
 
 	if (host->vmmc)
 		ret = regulator_disable(host->vmmc);
+
+	if (host->irq)
+		disable_irq(host->irq);
 
 	return ret;
 }
@@ -2267,7 +2468,8 @@ EXPORT_SYMBOL_GPL(sdhci_suspend_host);
 
 int sdhci_resume_host(struct sdhci_host *host)
 {
-	int ret;
+	int ret = 0;
+	struct mmc_host *mmc = host->mmc;
 
 	if (host->vmmc) {
 		int ret = regulator_enable(host->vmmc);
@@ -2281,15 +2483,46 @@ int sdhci_resume_host(struct sdhci_host *host)
 			host->ops->enable_dma(host);
 	}
 
-	ret = request_irq(host->irq, sdhci_irq, IRQF_SHARED,
-			  mmc_hostname(host->mmc), host);
-	if (ret)
-		return ret;
+	if (host->irq)
+		enable_irq(host->irq);
 
 	sdhci_init(host, (host->mmc->pm_flags & MMC_PM_KEEP_POWER));
 	mmiowb();
 
-	ret = mmc_resume_host(host->mmc);
+/*HTC_WIFI_START*/
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD)
+	if (mmc->card){
+		if (mmc->card->type != MMC_TYPE_SDIO) {
+			ret = mmc_resume_host(host->mmc);
+		} else {
+			printk("wifi_is_on: %d\n",wifi_is_on);
+            if (host->mmc->index == 1 && wifi_is_on == 1) {
+                printk("%s: host->mmc->index = %d, call mmc_resume_host()\n"
+                       , __func__,host->mmc->index);
+                ret = mmc_resume_host(host->mmc);
+            } else if (host->mmc->index == 1 && wifi_is_on != 1) {
+				if (host->ops->set_clock)
+					host->ops->set_clock(host, 0);
+			}
+		}
+		/* Enable card interrupt as it is overwritten in sdhci_init */
+		if ((mmc->caps & MMC_CAP_SDIO_IRQ) &&
+			(mmc->pm_flags & MMC_PM_KEEP_POWER))
+				if (host->card_int_set)
+					mmc->ops->enable_sdio_irq(mmc, true);
+	}
+#else
+    if (mmc->card && (mmc->card->type != MMC_TYPE_SDIO)){
+		ret = mmc_resume_host(host->mmc);
+		/* Enable card interrupt as it is overwritten in sdhci_init */
+		if ((mmc->caps & MMC_CAP_SDIO_IRQ) &&
+			(mmc->pm_flags & MMC_PM_KEEP_POWER))
+				if (host->card_int_set)
+					mmc->ops->enable_sdio_irq(mmc, true);
+	}
+#endif
+/*HTC_WIFI_END*/
+
 	sdhci_enable_card_detection(host);
 
 	/* Set the re-tuning expiration flag */
@@ -2362,6 +2595,7 @@ int sdhci_add_host(struct sdhci_host *host)
 	host->version = sdhci_readw(host, SDHCI_HOST_VERSION);
 	host->version = (host->version & SDHCI_SPEC_VER_MASK)
 				>> SDHCI_SPEC_VER_SHIFT;
+
 	if (host->version > SDHCI_SPEC_300) {
 		printk(KERN_ERR "%s: Unknown controller version (%d). "
 			"You may experience problems.\n", mmc_hostname(mmc),
@@ -2437,12 +2671,13 @@ int sdhci_add_host(struct sdhci_host *host)
 		mmc_dev(host->mmc)->dma_mask = &host->dma_mask;
 	}
 
-	if (host->version >= SDHCI_SPEC_300)
+	if (host->version >= SDHCI_SPEC_300) {
 		host->max_clk = (caps[0] & SDHCI_CLOCK_V3_BASE_MASK)
 			>> SDHCI_CLOCK_BASE_SHIFT;
-	else
+	} else {
 		host->max_clk = (caps[0] & SDHCI_CLOCK_BASE_MASK)
 			>> SDHCI_CLOCK_BASE_SHIFT;
+	}
 
 	host->max_clk *= 1000000;
 	if (host->max_clk == 0 || host->quirks &
@@ -2507,9 +2742,8 @@ int sdhci_add_host(struct sdhci_host *host)
 	if (host->quirks & SDHCI_QUIRK_DATA_TIMEOUT_USES_SDCLK)
 		host->timeout_clk = mmc->f_max / 1000;
 
-	mmc->max_discard_to = (1 << 27) / host->timeout_clk;
-
-	mmc->caps |= MMC_CAP_SDIO_IRQ | MMC_CAP_ERASE | MMC_CAP_CMD23;
+	if (!(host->quirks & SDHCI_QUIRK_NO_CALC_MAX_DISCARD_TO))
+		mmc->max_discard_to = (1 << 27) / host->timeout_clk;
 
 	if (host->quirks & SDHCI_QUIRK_MULTIBLOCK_READ_ACMD12)
 		host->flags |= SDHCI_AUTO_CMD12;
@@ -2538,8 +2772,19 @@ int sdhci_add_host(struct sdhci_host *host)
 		mmc->caps |= MMC_CAP_SD_HIGHSPEED | MMC_CAP_MMC_HIGHSPEED;
 
 	if ((host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION) &&
-	    mmc_card_is_removable(mmc))
+	    mmc_card_is_removable(mmc) && !(host->ops->get_cd))
 		mmc->caps |= MMC_CAP_NEEDS_POLL;
+#if defined(CONFIG_MACH_ENDEAVORU) || defined(CONFIG_MACH_ENDEAVORTD) || defined(CONFIG_MACH_ERAU)
+	/* HTC_WIFI_START */
+	if(host->mmc->index==1) {
+		mmc->caps |= MMC_CAP_NONREMOVABLE;
+		mmc->caps |= MMC_CAP_DISABLE;
+		mmc->caps |= MMC_CAP_POWER_OFF_CARD;
+		mmc->caps |= MMC_PM_KEEP_POWER;
+        host->flags |= MMC_PM_KEEP_POWER;
+	}
+	/* HTC_WIFI_END */
+#endif
 
 	/* UHS-I mode(s) supported by the host controller. */
 	if (host->version >= SDHCI_SPEC_300)

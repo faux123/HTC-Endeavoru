@@ -100,6 +100,7 @@ struct usb_request {
 
 	int			status;
 	unsigned		actual;
+	unsigned		udc_priv;
 };
 
 /*-------------------------------------------------------------------------*/
@@ -437,9 +438,9 @@ static inline void usb_ep_fifo_flush(struct usb_ep *ep)
 
 struct usb_dcd_config_params {
 	__u8  bU1devExitLat;	/* U1 Device exit Latency */
-#define USB_DEFULT_U1_DEV_EXIT_LAT	0x01	/* Less then 1 microsec */
+#define USB_DEFAULT_U1_DEV_EXIT_LAT	0x01	/* Less then 1 microsec */
 	__le16 bU2DevExitLat;	/* U2 Device exit Latency */
-#define USB_DEFULT_U2_DEV_EXIT_LAT	0x1F4	/* Less then 500 microsec */
+#define USB_DEFAULT_U2_DEV_EXIT_LAT	0x1F4	/* Less then 500 microsec */
 };
 
 
@@ -468,6 +469,7 @@ struct usb_gadget_ops {
 	int	(*start)(struct usb_gadget_driver *,
 			int (*bind)(struct usb_gadget *));
 	int	(*stop)(struct usb_gadget_driver *);
+	int	(*req_reset) (struct usb_gadget *);
 };
 
 /**
@@ -490,6 +492,9 @@ struct usb_gadget_ops {
  *	only supports HNP on a different root port.
  * @b_hnp_enable: OTG device feature flag, indicating that the A-Host
  *	enabled HNP support.
+ * @host_request: A flag set by user when wishes to take up host role.
+ * @otg_srp_reqd: OTG test mode feature to initiate SRP after the end of
+ * current session.
  * @name: Identifies the controller hardware type.  Used in diagnostics
  *	and sometimes configuration.
  * @dev: Driver model state for this abstract device.
@@ -524,6 +529,8 @@ struct usb_gadget {
 	unsigned			b_hnp_enable:1;
 	unsigned			a_hnp_support:1;
 	unsigned			a_alt_hnp_support:1;
+	unsigned			host_request:1;
+	unsigned			otg_srp_reqd:1;
 	const char			*name;
 	struct device			dev;
 };
@@ -754,6 +761,12 @@ static inline int usb_gadget_disconnect(struct usb_gadget *gadget)
 	return gadget->ops->pullup(gadget, 0);
 }
 
+static inline int usb_gadget_request_reset(struct usb_gadget *gadget)
+{
+	if (!gadget->ops->req_reset)
+		return -EOPNOTSUPP;
+	return gadget->ops->req_reset(gadget);
+}
 
 /*-------------------------------------------------------------------------*/
 
@@ -829,6 +842,7 @@ struct usb_gadget_driver {
 	int			(*setup)(struct usb_gadget *,
 					const struct usb_ctrlrequest *);
 	void			(*disconnect)(struct usb_gadget *);
+	void			(*mute_disconnect)(struct usb_gadget *);
 	void			(*suspend)(struct usb_gadget *);
 	void			(*resume)(struct usb_gadget *);
 
@@ -916,6 +930,11 @@ int usb_gadget_get_string(struct usb_gadget_strings *table, int id, u8 *buf);
 /*-------------------------------------------------------------------------*/
 
 /* utility to simplify managing config descriptors */
+
+/* Find and fill the requested descriptor into buffer */
+int
+usb_find_descriptor_fillbuf(void *, unsigned,
+		const struct usb_descriptor_header **, u8);
 
 /* write vector of descriptors into buffer */
 int usb_descriptor_fillbuf(void *, unsigned,

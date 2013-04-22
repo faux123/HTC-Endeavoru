@@ -96,6 +96,7 @@ extern char core_pattern[];
 extern unsigned int core_pipe_limit;
 extern int pid_max;
 extern int min_free_kbytes;
+extern int min_free_order_shift;
 extern int pid_max_min, pid_max_max;
 extern int sysctl_drop_caches;
 extern int percpu_pagelist_fraction;
@@ -224,6 +225,28 @@ extern struct ctl_table epoll_table[];
 
 #ifdef HAVE_ARCH_PICK_MMAP_LAYOUT
 int sysctl_legacy_va_layout;
+#endif
+
+#ifdef CONFIG_NO_HZ
+int sysctl_jiffies_per_tick = 1;
+extern ktime_t tick_period;
+extern int jiffies_per_tick;
+extern int jiffies_per_tick_handler(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp,
+		loff_t *ppos)
+{
+	int ret;
+
+	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (ret == 0 && write) {
+		if (sysctl_jiffies_per_tick > 0 && sysctl_jiffies_per_tick < HZ) {
+			jiffies_per_tick = sysctl_jiffies_per_tick;
+			tick_period = ktime_set(0, jiffies_per_tick * (NSEC_PER_SEC / HZ));
+		}
+	}
+	return ret;
+}
+
 #endif
 
 /* The default sysctl tables: */
@@ -984,6 +1007,19 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 #endif
+#ifdef CONFIG_NO_HZ
+	{
+		.procname	= "jiffies_per_tick",
+		.data		= &sysctl_jiffies_per_tick,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= jiffies_per_tick_handler,
+},
+#endif
+/*
+ * NOTE: do not add new entries to this table unless you have read
+ * Documentation/sysctl/ctl_unnumbered.txt
+ */
 	{ }
 };
 
@@ -1187,6 +1223,13 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= min_free_kbytes_sysctl_handler,
 		.extra1		= &zero,
+	},
+	{
+		.procname	= "min_free_order_shift",
+		.data		= &min_free_order_shift,
+		.maxlen		= sizeof(min_free_order_shift),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
 	},
 	{
 		.procname	= "percpu_pagelist_fraction",

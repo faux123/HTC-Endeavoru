@@ -486,7 +486,7 @@ static int netlink_release(struct socket *sock)
 	struct sock *sk = sock->sk;
 	struct netlink_sock *nlk;
 
-	if (!sk)
+	if (IS_ERR(sk) || (!sk))
 		return 0;
 
 	netlink_remove(sk);
@@ -1406,7 +1406,7 @@ static int netlink_recvmsg(struct kiocb *kiocb, struct socket *sock,
 	copied = 0;
 
 	skb = skb_recv_datagram(sk, flags, noblock, &err);
-	if (skb == NULL)
+	if (skb == NULL || IS_ERR(skb))
 		goto out;
 
 	data_skb = skb;

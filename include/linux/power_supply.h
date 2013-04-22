@@ -14,6 +14,7 @@
 #define __LINUX_POWER_SUPPLY_H__
 
 #include <linux/device.h>
+#include <linux/wakelock.h>
 #include <linux/workqueue.h>
 #include <linux/leds.h>
 
@@ -43,6 +44,17 @@ enum {
 	POWER_SUPPLY_CHARGE_TYPE_NONE,
 	POWER_SUPPLY_CHARGE_TYPE_TRICKLE,
 	POWER_SUPPLY_CHARGE_TYPE_FAST,
+};
+
+enum {
+	POWER_SUPPLY_DISABLE_CHARGE = 0,
+	POWER_SUPPLY_ENABLE_SLOW_CHARGE,
+	POWER_SUPPLY_ENABLE_FAST_CHARGE,
+	POWER_SUPPLY_ENABLE_9VAC_CHARGE,
+	POWER_SUPPLY_ENABLE_WIRELESS_CHARGE,
+	POWER_SUPPLY_ENABLE_SLOW_HV_CHARGE,
+	POWER_SUPPLY_ENABLE_FAST_HV_CHARGE,
+	POWER_SUPPLY_ENABLE_INTERNAL,
 };
 
 enum {
@@ -101,6 +113,7 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_CHARGE_NOW,
 	POWER_SUPPLY_PROP_CHARGE_AVG,
 	POWER_SUPPLY_PROP_CHARGE_COUNTER,
+	POWER_SUPPLY_PROP_CHARGER_CONTROL,
 	POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_EMPTY_DESIGN,
 	POWER_SUPPLY_PROP_ENERGY_FULL,
@@ -116,6 +129,7 @@ enum power_supply_property {
 	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
 	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
 	POWER_SUPPLY_PROP_TYPE, /* use power_supply.type instead */
+	POWER_SUPPLY_PROP_OVERLOAD,
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_MANUFACTURER,
@@ -130,6 +144,7 @@ enum power_supply_type {
 	POWER_SUPPLY_TYPE_USB_DCP,	/* Dedicated Charging Port */
 	POWER_SUPPLY_TYPE_USB_CDP,	/* Charging Downstream Port */
 	POWER_SUPPLY_TYPE_USB_ACA,	/* Accessory Charger Adapters */
+	POWER_SUPPLY_TYPE_WIRELESS,
 };
 
 union power_supply_propval {
@@ -163,6 +178,9 @@ struct power_supply {
 	/* private */
 	struct device *dev;
 	struct work_struct changed_work;
+	spinlock_t changed_lock;
+	bool changed;
+	struct wake_lock work_wake_lock;
 
 #ifdef CONFIG_LEDS_TRIGGERS
 	struct led_trigger *charging_full_trig;

@@ -62,8 +62,18 @@ static int mmc_queue_thread(void *d)
 
 		if (req || mq->mqrq_prev->req) {
 			set_current_state(TASK_RUNNING);
+		/* Abort any current bk ops of eMMC card by issuing HPI */
+			if (mmc_card_mmc(mq->card) && mmc_card_doing_bkops(mq->card)) {
+				mmc_interrupt_hpi(mq->card);
+			}
 			mq->issue_fn(mq, req);
 		} else {
+			/*
+			 * Since the queue is empty, start synchronous
+			 * background ops if there is a request for it.
+			 */
+			if (mmc_card_need_bkops(mq->card))
+				mmc_bkops_start(mq->card, false, true);
 			if (kthread_should_stop()) {
 				set_current_state(TASK_RUNNING);
 				break;

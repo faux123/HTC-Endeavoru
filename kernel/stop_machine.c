@@ -343,6 +343,12 @@ static int __cpuinit cpu_stop_cpu_callback(struct notifier_block *nfb,
 		spin_lock_irq(&stopper->lock);
 		list_for_each_entry(work, &stopper->works, list)
 			cpu_stop_signal_done(work->done, false);
+		if (!list_empty(&stopper->works))
+		{
+			pr_warn("KERNEL_WARNING: stopper->works is not empty after "
+			    "migration/%u stops; clean it manually...\n", cpu);
+			INIT_LIST_HEAD(&stopper->works);
+		}
 		stopper->enabled = false;
 		spin_unlock_irq(&stopper->lock);
 		/* release the stopper */

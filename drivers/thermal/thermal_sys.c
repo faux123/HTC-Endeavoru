@@ -692,6 +692,7 @@ static void thermal_zone_device_passive(struct thermal_zone_device *tz,
 	struct thermal_cooling_device_instance *instance;
 	struct thermal_cooling_device *cdev;
 	long state, max_state;
+	long cur_temp;
 
 	/*
 	 * Above Trip?
@@ -748,8 +749,15 @@ static void thermal_zone_device_passive(struct thermal_zone_device *tz,
 		cdev->ops->get_max_state(cdev, &max_state);
 		if (state > 0)
 			cdev->ops->set_cur_state(cdev, --state);
-		if (state == 0)
+		if (state == 0) {
 			tz->passive = false;
+			if (tz->ops->get_temp(tz, &cur_temp)) {
+				tz->passive = true;
+			}
+			if (cur_temp >= trip_temp) {
+				tz->passive = true;
+			}
+		}
 	}
 }
 

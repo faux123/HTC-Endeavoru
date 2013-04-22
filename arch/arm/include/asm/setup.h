@@ -16,7 +16,7 @@
 
 #include <linux/types.h>
 
-#define COMMAND_LINE_SIZE 1024
+#define COMMAND_LINE_SIZE (2048)
 
 /* The list ends with an ATAG_NONE node. */
 #define ATAG_NONE	0x00000000
@@ -95,6 +95,7 @@ struct tag_serialnr {
 
 struct tag_revision {
 	__u32 rev;
+	__u32 rev2;
 };
 
 /* initial values for vesafb-type framebuffers. see struct screen_info
@@ -126,6 +127,20 @@ struct tag_cmdline {
 	char	cmdline[1];	/* this is the minimum size */
 };
 
+/* Microp version */
+#define ATAG_MICROP_VERSION   0x5441000a
+
+struct tag_microp_version {
+	char ver[4];
+};
+
+/* Light sensor calibration value */
+#define ATAG_ALS       0x5441001b
+
+struct tag_als_kadc {
+	__u32 kadc;
+};
+
 /* acorn RiscPC specific information */
 #define ATAG_ACORN	0x41000101
 
@@ -153,6 +168,8 @@ struct tag {
 		struct tag_initrd	initrd;
 		struct tag_serialnr	serialnr;
 		struct tag_revision	revision;
+		struct tag_microp_version	microp_version;
+		struct tag_als_kadc	als_kadc;
 		struct tag_videolfb	videolfb;
 		struct tag_cmdline	cmdline;
 

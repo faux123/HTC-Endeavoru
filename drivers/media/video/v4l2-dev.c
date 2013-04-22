@@ -200,7 +200,15 @@ static struct class video_class = {
 
 struct video_device *video_devdata(struct file *file)
 {
-	return video_device[iminor(file->f_path.dentry->d_inode)];
+	/* HTC_START (klockwork issue)*/
+	if(iminor(file->f_path.dentry->d_inode)<VIDEO_NUM_DEVICES)
+		return video_device[iminor(file->f_path.dentry->d_inode)];
+	else{
+		printk(KERN_ERR "%s file->f_path.dentry->d_inode is out of VIDEO_NUM_DEVICES range \n",
+		       __func__);
+		return NULL;
+	}
+	/* HTC_END */
 }
 EXPORT_SYMBOL(video_devdata);
 

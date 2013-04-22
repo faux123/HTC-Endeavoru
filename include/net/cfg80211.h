@@ -444,7 +444,10 @@ enum station_info_flags {
 	STATION_INFO_SIGNAL_AVG		= 1<<13,
 	STATION_INFO_RX_BITRATE		= 1<<14,
 	STATION_INFO_BSS_PARAM          = 1<<15,
-	STATION_INFO_CONNECTED_TIME	= 1<<16
+	STATION_INFO_CONNECTED_TIME	= 1<<16,
+	/*HTC_WIFI_START*/
+	STATION_INFO_ASSOC_REQ_IES	= 1<<17
+	/*HTC_WIFI_END*/
 };
 
 /**
@@ -536,6 +539,11 @@ struct sta_bss_parameters {
  *	This number should increase every time the list of stations
  *	changes, i.e. when a station is added or removed, so that
  *	userspace can tell whether it got a consistent snapshot.
+ * @assoc_req_ies: IEs from (Re)Association Request.
+ *	This is used only when in AP mode with drivers that do not use
+ *	user space MLME/SME implementation. The information is provided for
+ *	the cfg80211_new_sta() calls to notify user space of the IEs.
+ * @assoc_req_ies_len: Length of assoc_req_ies buffer in octets.
  */
 struct station_info {
 	u32 filled;
@@ -558,6 +566,14 @@ struct station_info {
 	struct sta_bss_parameters bss_param;
 
 	int generation;
+
+	const u8 *assoc_req_ies;
+	size_t assoc_req_ies_len;
+
+	/*
+	 * Note: Add a new enum station_info_flags value for each new field and
+	 * use it to check which fields are initialized.
+	 */
 };
 
 /**
@@ -782,7 +798,9 @@ struct cfg80211_ssid {
  * @dev: the interface
  * @aborted: (internal) scan request was notified as aborted
  */
+#define SCAN_REQUEST_MAGIC	0xdeadbeef  //broadcom: check request magic word is OK
 struct cfg80211_scan_request {
+	int magic;  //broadcom: check request magic word is OK
 	struct cfg80211_ssid *ssids;
 	int n_ssids;
 	u32 n_channels;

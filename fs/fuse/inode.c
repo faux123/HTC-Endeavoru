@@ -69,6 +69,7 @@ struct fuse_mount_data {
 	unsigned flags;
 	unsigned max_read;
 	unsigned blksize;
+	unsigned allow_utime;
 };
 
 struct fuse_forget_link *fuse_alloc_forget(void)
@@ -405,6 +406,7 @@ enum {
 	OPT_ALLOW_OTHER,
 	OPT_MAX_READ,
 	OPT_BLKSIZE,
+	OPT_ALLOW_UTIME,
 	OPT_ERR
 };
 
@@ -417,6 +419,7 @@ static const match_table_t tokens = {
 	{OPT_ALLOW_OTHER,		"allow_other"},
 	{OPT_MAX_READ,			"max_read=%u"},
 	{OPT_BLKSIZE,			"blksize=%u"},
+	{OPT_ALLOW_UTIME,		"allow_utime=%o"},
 	{OPT_ERR,			NULL}
 };
 
@@ -486,6 +489,12 @@ static int parse_fuse_opt(char *opt, struct fuse_mount_data *d, int is_bdev)
 			d->blksize = value;
 			break;
 
+		case OPT_ALLOW_UTIME:
+			if (match_octal(&args[0], &value))
+				return 0;
+			d->allow_utime = value & (S_IWGRP | S_IWOTH);
+			break;
+
 		default:
 			return 0;
 		}
@@ -513,6 +522,8 @@ static int fuse_show_options(struct seq_file *m, struct vfsmount *mnt)
 	if (mnt->mnt_sb->s_bdev &&
 	    mnt->mnt_sb->s_blocksize != FUSE_DEFAULT_BLKSIZE)
 		seq_printf(m, ",blksize=%lu", mnt->mnt_sb->s_blocksize);
+	if (fc->allow_utime)
+		seq_printf(m, ",allow_utime=%04o", fc->allow_utime);
 	return 0;
 }
 
@@ -983,6 +994,7 @@ static int fuse_fill_super(struct super_block *sb, void *data, int silent)
 	fc->user_id = d.user_id;
 	fc->group_id = d.group_id;
 	fc->max_read = max_t(unsigned, 4096, d.max_read);
+	fc->allow_utime = d.allow_utime;
 
 	/* Used by get_root_inode() */
 	sb->s_fs_info = fc;

@@ -71,6 +71,7 @@
 #include <linux/ctype.h>
 #include <linux/ftrace.h>
 #include <linux/slab.h>
+#include <linux/cpuacct.h>
 
 #include <asm/tlb.h>
 #include <asm/irq_regs.h>
@@ -471,6 +472,11 @@ struct rq {
 #endif
 	int skip_clock_update;
 
+	/* time-based average load */
+	u64 nr_last_stamp;
+	unsigned int ave_nr_running;
+	seqcount_t ave_seqcnt;
+
 	/* capture load from *all* tasks on this cpu: */
 	struct load_weight load;
 	unsigned long nr_load_updates;
@@ -572,6 +578,10 @@ struct rq {
 #ifdef CONFIG_SMP
 	struct task_struct *wake_list;
 #endif
+
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+    struct bthp_rqinfo bthp_rqinfo;
+#endif
 };
 
 static DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
@@ -613,22 +623,19 @@ static inline int cpu_of(struct rq *rq)
 /*
  * Return the group to which this tasks belongs.
  *
- * We use task_subsys_state_check() and extend the RCU verification with
- * pi->lock and rq->lock because cpu_cgroup_attach() holds those locks for each
- * task it moves into the cgroup. Therefore by holding either of those locks,
- * we pin the task to the current cgroup.
+ * We cannot use task_subsys_state() and friends because the cgroup
+ * subsystem changes that value before the cgroup_subsys::attach() method
+ * is called, therefore we cannot pin it and might observe the wrong value.
+ *
+ * The same is true for autogroup's p->signal->autogroup->tg, the autogroup
+ * core changes this before calling sched_move_task().
+ *
+ * Instead we use a 'copy' which is updated from sched_move_task() while
+ * holding both task_struct::pi_lock and rq::lock.
  */
 static inline struct task_group *task_group(struct task_struct *p)
 {
-	struct task_group *tg;
-	struct cgroup_subsys_state *css;
-
-	css = task_subsys_state_check(p, cpu_cgroup_subsys_id,
-			lockdep_is_held(&p->pi_lock) ||
-			lockdep_is_held(&task_rq(p)->lock));
-	tg = container_of(css, struct task_group, css);
-
-	return autogroup_task_group(p, tg);
+	return p->sched_task_group;
 }
 
 /* Change a task's cfs_rq and parent entity if it moves across CPUs/groups */
@@ -1755,14 +1762,1326 @@ static const struct sched_class rt_sched_class;
 
 #include "sched_stats.h"
 
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+#include <linux/cpu_debug.h>
+
+#define _do_evaluate(func, dir, ...) \
+        evaluate_##func##_chain_##dir (__VA_ARGS__)
+#define _do_update(type, ...) \
+        update_chain_##type (__VA_ARGS__)
+#define _do_insert(type, ...) \
+        insert_to_chain_##type (__VA_ARGS__)
+#define _do_delete(type, ...) \
+        delete_in_chain_##type (__VA_ARGS__)
+
+#define CORTEX_A9_CACHE_LINE        32
+
+unsigned long *t_rate = NULL; /* in kHZ */
+EXPORT_SYMBOL(t_rate);
+
+extern bool is_bthp_en (void);
+extern bool is_optimistic_up (void);
+extern unsigned int mips_aggressive_factor;
+
+static inline void arch_prefetch_range (
+   void *addr,
+   size_t len
+   )
+{
+	char *cp;
+	char *end = addr + len;
+
+	for (cp = addr; cp < end; cp += CORTEX_A9_CACHE_LINE) {
+		prefetch (cp);
+    }
+}
+
+int get_perf_votes (
+    int cpu
+    )
+{
+    return cpu_rq(cpu)->bthp_rqinfo.votes_for_perf_up;
+}
+EXPORT_SYMBOL(get_perf_votes);
+
+unsigned long cpu_nr_running (
+    int cpu
+    )
+{
+    return cpu_rq(cpu)->nr_running;
+}
+EXPORT_SYMBOL(cpu_nr_running);
+
+bool bthp_empty (
+    int cpu
+    )
+{
+    return (list_empty(&cpu_rq(cpu)->bthp_rqinfo._max_a_head) &&
+            list_empty(&cpu_rq(cpu)->bthp_rqinfo._max_na_head) &&
+            list_empty(&cpu_rq(cpu)->bthp_rqinfo._min_a_head) &&
+            list_empty(&cpu_rq(cpu)->bthp_rqinfo._min_na_head)
+            );
+}
+EXPORT_SYMBOL(bthp_empty);
+
+unsigned int tracked_tasks_nr (
+   int cpu
+   )
+{
+    struct rq *rq = cpu_rq(cpu);
+    unsigned int idx;
+
+    arch_prefetch_range (rq->bthp_rqinfo._min_cc_a,
+                         sizeof(rq->bthp_rqinfo._min_cc_a));
+    for (idx = MAX_TRACKED_TASKS - 1; idx >= 0; idx--) {
+        if (rq->bthp_rqinfo._min_cc_a[idx]) {
+            return (
+               ++idx,
+               idx > rq->nr_running? rq->nr_running: idx
+               );
+        }
+    }
+
+    return 0;
+}
+EXPORT_SYMBOL(tracked_tasks_nr);
+
+void cleanup_bthp_rqinfo (void)
+{
+    int cpu;
+    int idx;
+
+    for_each_possible_cpu (cpu) {
+        struct rq *rq = cpu_rq(cpu);
+        if (likely(rq)) {
+            raw_spin_lock_irq (&rq->lock);
+
+            /* clean up bthp task info. for all running tasks */
+            arch_prefetch_range (rq->bthp_rqinfo._min_cc_a,
+                                 sizeof(rq->bthp_rqinfo._min_cc_a));
+            for (idx = MAX_TRACKED_TASKS-1; idx >= 0; idx--) {
+                if (rq->bthp_rqinfo._max[idx].task) {
+                     memset (
+                        &rq->bthp_rqinfo._max[idx].task->bthp_tskinfo,
+                        0,
+                        sizeof(rq->bthp_rqinfo._max[idx].task->bthp_tskinfo)
+                        );
+                }
+            }
+
+            /* reinit bthp rq info. */
+            memset(&rq->bthp_rqinfo, 0, sizeof(rq->bthp_rqinfo));
+            INIT_LIST_HEAD(&rq->bthp_rqinfo._max_a_head);
+            INIT_LIST_HEAD(&rq->bthp_rqinfo._max_na_head);
+            INIT_LIST_HEAD(&rq->bthp_rqinfo._min_a_head);
+            INIT_LIST_HEAD(&rq->bthp_rqinfo._min_na_head);
+
+            raw_spin_unlock_irq (&rq->lock);
+        }
+    }
+}
+EXPORT_SYMBOL(cleanup_bthp_rqinfo);
+
+extern void cpus_load_stats (int, unsigned long *,
+                             unsigned long *,
+                             unsigned long *);
+
+bool lb_prophet_up (
+    int cpu,
+    unsigned long *total_cc,
+    unsigned long *min_tradable_cc
+    )
+{
+    struct rq *rq = cpu_rq(cpu);
+    unsigned long load = 0UL, avg_load_per_task = 0UL, global_avg_load = 0UL;
+    int active_cpus = num_online_cpus ();
+    unsigned int weight_moved = 0;
+    unsigned int task_moved = 0;
+    int idx_na, idx_a;
+	bool optimistic_mode = is_optimistic_up ();
+
+    *total_cc = *min_tradable_cc = 0UL;
+
+    /* check possibility of load balance at the very first place */
+    if (rq->nr_running <= 1 ||
+		(!optimistic_mode && !rq->bthp_rqinfo._min_cc_na[0]) ||
+		(optimistic_mode && !rq->bthp_rqinfo._max_cc_na[0]))
+	{
+        return false;
+    }
+
+    /* poll max tradable cc index from 'na' group
+     * (which can be load-balanced)
+     */
+    if (!optimistic_mode) {
+		arch_prefetch_range (rq->bthp_rqinfo._min_cc_na,
+							 sizeof(rq->bthp_rqinfo._min_cc_na));
+		for (idx_na = MAX_TRACKED_TASKS-1; idx_na >= 0; idx_na--) {
+			if (rq->bthp_rqinfo._min_cc_na[idx_na]) {
+				break;
+			}
+		}
+
+	} else {
+		arch_prefetch_range (rq->bthp_rqinfo._max_cc_na,
+							 sizeof(rq->bthp_rqinfo._max_cc_na));
+		for (idx_na = MAX_TRACKED_TASKS-1; idx_na >= 0; idx_na--) {
+			if (rq->bthp_rqinfo._max_cc_na[idx_na]) {
+				break;
+			}
+		}
+	}
+
+    /* poll total cc from 'a' group
+     * (count in those tasks bound to specific cpu together)
+     */
+    if (!optimistic_mode) {
+		arch_prefetch_range (rq->bthp_rqinfo._min_cc_a,
+							 sizeof(rq->bthp_rqinfo._min_cc_a));
+		for (idx_a = MAX_TRACKED_TASKS-1; idx_a >= 0; idx_a--) {
+			if (rq->bthp_rqinfo._min_cc_a[idx_a]) {
+				*total_cc = rq->bthp_rqinfo._min_cc_a[idx_a];
+				break;
+			}
+		}
+
+	} else {
+		arch_prefetch_range (rq->bthp_rqinfo._max_cc_a,
+							 sizeof(rq->bthp_rqinfo._max_cc_a));
+		for (idx_a = MAX_TRACKED_TASKS-1; idx_a >= 0; idx_a--) {
+			if (rq->bthp_rqinfo._max_cc_a[idx_a]) {
+				*total_cc = rq->bthp_rqinfo._max_cc_a[idx_a];
+				break;
+			}
+		}
+	}
+
+    CPU_DEBUG_PRINTK (CPU_DEBUG_BTHP_LBX,
+                      " %s: (%d, %lu / %d, %lu)",
+                      __func__,
+                      idx_na,
+                      (optimistic_mode?
+					   rq->bthp_rqinfo._max_cc_na[idx_na]:
+					   rq->bthp_rqinfo._min_cc_na[idx_na]),
+                      idx_a,
+                      *total_cc
+                      );
+
+    /* chain is being modified... skip this round */
+	if ((!optimistic_mode &&
+		 rq->bthp_rqinfo._min_cc_na[idx_na] >
+		 rq->bthp_rqinfo._min_cc_a[idx_a]) ||
+		(optimistic_mode &&
+		 rq->bthp_rqinfo._max_cc_na[idx_na] >
+		 rq->bthp_rqinfo._max_cc_a[idx_a]))
+	{
+		return false;
+	}
+
+    /* poll the latest weight load across all schedule domains */
+    cpus_load_stats (cpu, &load, &avg_load_per_task, &global_avg_load);
+
+    /* turn another core up could offload load_weight */
+    global_avg_load = ((global_avg_load * active_cpus) / (active_cpus + 1));
+
+    CPU_DEBUG_PRINTK (CPU_DEBUG_BTHP_LBX,
+                      " %s: load(%lu, %lu, %lu)",
+                      __func__,
+                      global_avg_load,
+                      load,
+                      avg_load_per_task
+                      );
+
+    /* no chance to balance tasks to any new-ON core */
+    if (load < global_avg_load || !avg_load_per_task)
+        return false;
+
+    /* scale global weight and then wrap around # of balanced tasks */
+    weight_moved = load - global_avg_load;
+    task_moved = (weight_moved + (avg_load_per_task>>1)) / avg_load_per_task;
+
+    /* offload over-number, don't be kidding */
+    task_moved = (task_moved >= rq->nr_running? rq->nr_running-1: task_moved);
+
+    /* never go over the boundary of # of tracked na group of tasks */
+    task_moved = (task_moved > (idx_na+1)? (idx_na+1): task_moved);
+
+    if (likely(task_moved)) {
+		return (
+		   *min_tradable_cc = (
+				optimistic_mode?
+				rq->bthp_rqinfo._max_cc_na[task_moved-1]:
+				rq->bthp_rqinfo._min_cc_na[task_moved-1]
+				),
+		   true
+		   );
+    }
+
+    return false;
+}
+EXPORT_SYMBOL(lb_prophet_up);
+
+bool lb_prophet_down (
+    int cpu,
+    int cpu_to_be_down,
+    unsigned long *total_cc,
+    unsigned long *max_added_cc
+    )
+{
+    struct rq *rq = cpu_rq(cpu);
+    struct rq *dest_rq = cpu_rq(cpu_to_be_down);
+    unsigned long load = 0UL, avg_load_per_task = 0UL, global_avg_load = 0UL;
+    int active_cpus = num_online_cpus ();
+    unsigned int weight_added = 0;
+    unsigned int task_added = 0;
+    int idx;
+
+    if (cpu == cpu_to_be_down ||
+        !cpu_online (cpu) ||
+        !cpu_online (cpu_to_be_down))
+    {
+        return false;
+    }
+
+    *total_cc = *max_added_cc = 0UL;
+
+    /* no tasks running on dest core,
+     * what a best trade we could ever have !!
+     */
+    if (!dest_rq->nr_running || !dest_rq->bthp_rqinfo._max_cc_a[0]) {
+        return true;
+    }
+
+    /* poll total cc grom a group (which can be migrated) */
+    arch_prefetch_range (dest_rq->bthp_rqinfo._max_cc_a,
+                         sizeof(dest_rq->bthp_rqinfo._max_cc_a));
+    for (idx = MAX_TRACKED_TASKS-1; idx >= 0; idx--) {
+        if (dest_rq->bthp_rqinfo._max_cc_a[idx]) {
+            *total_cc = dest_rq->bthp_rqinfo._max_cc_a[idx];
+            break;
+        }
+    }
+
+    /* poll the latest weight load across all schedule domains */
+    cpus_load_stats (cpu_to_be_down, &load,
+                     &avg_load_per_task,
+                     &global_avg_load);
+
+    /* to cut dest core off, estimate how much weight
+     * will be added to our running core
+     */
+    weight_added =
+        ((global_avg_load * active_cpus) / (active_cpus - 1)) -
+        rq->load.weight;
+
+    /* our running core is over-weighted now,
+     * don't turn dest core off, otherwise more load weight MIGHT be offloaded
+     * to our core, turns out downgrading our core's perf.
+     */
+    if (weight_added < 0 || !avg_load_per_task) {
+        return false;
+    }
+
+    /* wrap around # of migrated tasks */
+    task_added = (weight_added + (avg_load_per_task>>1)) / avg_load_per_task;
+
+    /* over-number the # of tasks running on dest core, don't be kidding */
+    task_added = (task_added >= dest_rq->nr_running?
+                  dest_rq->nr_running:
+                  task_added);
+
+    /* never go over the boundary of # of tracked tasks */
+    task_added = (task_added > (idx+1)? (idx+1): task_added);
+
+    if (likely(task_added)) {
+        return (*max_added_cc = dest_rq->bthp_rqinfo._max_cc_a[task_added-1],
+                true
+                );
+    }
+
+    return false;
+}
+EXPORT_SYMBOL(lb_prophet_down);
+
+static inline void update_task_efficiency (
+    struct task_struct *t,
+    unsigned long long delta
+    )
+{
+    int idx, scale;
+
+    delta *= *t_rate * 1000;
+    do_div(delta, NSEC_PER_SEC);
+
+    *(arch_prefetch_range (
+       t->bthp_tskinfo.cc_efficiency,
+       sizeof(t->bthp_tskinfo.cc_efficiency)),
+      &t->bthp_tskinfo.cc_efficiency[0]) = (unsigned long)delta;
+
+    for (idx = 1, scale = 2;
+         idx < _EFFICIENCY_WEIGHT_;
+         idx++, scale += scale)
+    {
+        unsigned long old_eff, new_eff;
+
+        old_eff = t->bthp_tskinfo.cc_efficiency[idx];
+        new_eff = t->bthp_tskinfo.cc_efficiency[0];
+
+        /*
+         * Round up the averaging division if efficiency is increasing. This
+         * prevents us from getting stuck on 9 if the efficiency is 10, for
+         * example.
+         */
+        if (new_eff > old_eff)
+            new_eff += scale - 1;
+
+        t->bthp_tskinfo.cc_efficiency[idx] =
+            (old_eff * (scale - 1) + new_eff) >> idx;
+    }
+}
+
+static inline void update_task_latency(
+    struct task_struct *t,
+    unsigned long long delta
+    )
+{
+    int idx, scale;
+
+    *(arch_prefetch_range (
+       t->bthp_tskinfo.cc_latency,
+       sizeof(t->bthp_tskinfo.cc_latency)),
+      &t->bthp_tskinfo.cc_latency[0]) = delta;
+
+    for (idx = 1, scale = 2; idx < _LATENCY_WEIGHT_; idx++, scale += scale) {
+        unsigned long old_lat, new_lat;
+
+        /* always deem the latency of (1st enqueu ~ 1st execute)
+         * as fair base
+         */
+        if (!t->bthp_tskinfo.unfinished) {
+            t->bthp_tskinfo.cc_latency[idx] = t->bthp_tskinfo.cc_latency[0];
+            continue;
+        }
+
+        old_lat = t->bthp_tskinfo.cc_latency[idx];
+        new_lat = t->bthp_tskinfo.cc_latency[0];
+
+        /*
+         * Round up the averaging division if latency is increasing. This
+         * prevents us from getting stuck on 9 if the latency is 10, for
+         * example.
+         */
+        if (new_lat > old_lat)
+            new_lat += scale - 1;
+
+        t->bthp_tskinfo.cc_latency[idx] =
+            (old_lat * (scale - 1) + new_lat) >> idx;
+    }
+}
+
+static bool is_task_efficiency_critical (
+    struct task_struct *t
+    )
+{
+    int eff_idx;
+    unsigned long aggressive_cc_efficiency = 0UL;
+
+    for (eff_idx = 1; eff_idx < _EFFICIENCY_WEIGHT_; eff_idx++) {
+        if (!(t->bthp_tskinfo.unfinished >> eff_idx)) {
+            break;
+        }
+    }
+    --eff_idx;
+
+    /* could be greedy ONLY when getting older */
+    if (eff_idx > 0) {
+        aggressive_cc_efficiency =
+            (t->bthp_tskinfo.cc_efficiency[eff_idx] *
+             (100+mips_aggressive_factor)) / 100;
+    }
+
+    return
+        /* execution MIPS is decreasing... */
+        (t->bthp_tskinfo.cc_efficiency[eff_idx] >
+         t->bthp_tskinfo.cc_efficiency[0]
+         ||
+
+        /* greedy UP */
+        aggressive_cc_efficiency > t->bthp_tskinfo.cc_efficiency[0]);
+}
+
+static void eval_curr_efficiency (
+    struct task_struct *t,
+    unsigned long *eval_max,
+    unsigned long *eval_min
+    )
+{
+    int eff_idx;
+
+    for (eff_idx = 1; eff_idx < _EFFICIENCY_WEIGHT_; eff_idx++) {
+        if (!(t->bthp_tskinfo.unfinished >> eff_idx)) {
+            break;
+        }
+    }
+
+    eff_idx--;
+
+    /* pick up the big one between history & now */
+    if (eval_max) {
+        *eval_max = max (t->bthp_tskinfo.cc_efficiency[eff_idx],
+                         t->bthp_tskinfo.cc_efficiency[0]);
+    }
+
+    /* pick up the small one between history & now */
+    if (eval_min) {
+        *eval_min = min (t->bthp_tskinfo.cc_efficiency[eff_idx],
+                         t->bthp_tskinfo.cc_efficiency[0]);
+    }
+}
+
+static bool is_task_latency_critical (
+    struct task_struct *t
+    )
+{
+    int lat_idx;
+
+    for (lat_idx = 1; lat_idx < _LATENCY_WEIGHT_; lat_idx++) {
+        if (!(t->bthp_tskinfo.unfinished >> lat_idx)) {
+            break;
+        }
+    }
+
+    /* in-runQ waiting latency is increasing... */
+    return (t->bthp_tskinfo.cc_latency[--lat_idx] <
+            t->bthp_tskinfo.cc_latency[0]);
+}
+
+static inline void update_chain_max (
+    struct bthp_rqinfo *pbthp_rqinfo,
+    int curr_idx,
+    unsigned long curr_max
+    )
+{
+    unsigned int num_pinned =
+        cpumask_weight (&pbthp_rqinfo->_max[curr_idx].task->cpus_allowed);
+    bool is_na = (num_pinned == 0 || num_pinned > 1);
+    unsigned int num_pinned_prev =
+        cpumask_weight (&pbthp_rqinfo->_max[curr_idx].last_cpumask);
+    bool is_chg = (num_pinned_prev == 1)? (num_pinned != 1): (num_pinned == 1);
+
+    struct list_head *lh, *lh_next;
+    int num_entries;
+
+	/* refresh cpumask if necessary */
+    if (is_chg) {
+		cpumask_copy(&pbthp_rqinfo->_max[curr_idx].last_cpumask,
+					 &pbthp_rqinfo->_max[curr_idx].task->cpus_allowed);
+    }
+
+    /* refresh current efficiency */
+    pbthp_rqinfo->_max[curr_idx].curr_eff.curr_max_eff = curr_max;
+
+    /******************************************************
+     * update for w/ concerns of affinity
+     *****************************************************/
+    if (likely(!list_empty(&pbthp_rqinfo->_max_a_head))) {
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_a_head) {
+            if (lh == &pbthp_rqinfo->_max[curr_idx].list_a) {
+                list_del(lh);
+                break;
+            }
+        }
+
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_a_head) {
+            if (list_entry(lh,
+                           struct t_store,
+                           list_a)->curr_eff.curr_max_eff < curr_max)
+            {
+                list_add_tail(&pbthp_rqinfo->_max[curr_idx].list_a, lh);
+                break;
+            }
+        }
+
+        /* this is the smallest */
+        if (lh == &pbthp_rqinfo->_max_a_head) {
+            list_add_tail(&pbthp_rqinfo->_max[curr_idx].list_a, lh);
+        }
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_max_cc_a,
+                        sizeof(pbthp_rqinfo->_max_cc_a));
+    memset(pbthp_rqinfo->_max_cc_a, 0, sizeof(pbthp_rqinfo->_max_cc_a));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_a_head) {
+		pbthp_rqinfo->_max_cc_a[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_max_cc_a[num_entries-1] +
+			 list_entry(lh, struct t_store, list_a)->curr_eff.curr_max_eff):
+			(list_entry(lh, struct t_store, list_a)->curr_eff.curr_max_eff);
+        num_entries++;
+    }
+
+    if (!is_na && likely(!is_chg))
+        return;
+
+	/* always delete first */
+	list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_na_head) {
+		if (lh == &pbthp_rqinfo->_max[curr_idx].list_na) {
+			list_del(lh);
+			break;
+		}
+	}
+
+	/* re-put onto max na_ll in order */
+    if (is_na) {
+		list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_na_head) {
+			if (list_entry(lh,
+						   struct t_store,
+						   list_na)->curr_eff.curr_max_eff < curr_max)
+			{
+				list_add_tail(&pbthp_rqinfo->_max[curr_idx].list_na, lh);
+				break;
+			}
+		}
+
+		/* this is the smallest */
+		if (lh == &pbthp_rqinfo->_max_na_head) {
+			list_add_tail(&pbthp_rqinfo->_max[curr_idx].list_na, lh);
+		}
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_max_cc_na,
+                        sizeof(pbthp_rqinfo->_max_cc_na));
+    memset(pbthp_rqinfo->_max_cc_na, 0, sizeof(pbthp_rqinfo->_max_cc_na));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_na_head) {
+		pbthp_rqinfo->_max_cc_na[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_max_cc_na[num_entries-1] +
+			 list_entry(lh, struct t_store, list_na)->curr_eff.curr_max_eff):
+			(list_entry(lh, struct t_store, list_na)->curr_eff.curr_max_eff);
+        num_entries++;
+    }
+}
+
+static inline void update_chain_min (
+    struct bthp_rqinfo *pbthp_rqinfo,
+    int curr_idx,
+    unsigned long curr_min
+    )
+{
+    unsigned int num_pinned =
+        cpumask_weight (&pbthp_rqinfo->_min[curr_idx].task->cpus_allowed);
+    bool is_na = (num_pinned == 0 || num_pinned > 1);
+    unsigned int num_pinned_prev =
+        cpumask_weight (&pbthp_rqinfo->_min[curr_idx].last_cpumask);
+    bool is_chg = (num_pinned_prev == 1)? (num_pinned != 1): (num_pinned == 1);
+
+    struct list_head *lh, *lh_next;
+    int num_entries;
+
+	/* refresh cpumask if necessary */
+    if (is_chg) {
+		cpumask_copy(&pbthp_rqinfo->_min[curr_idx].last_cpumask,
+					 &pbthp_rqinfo->_min[curr_idx].task->cpus_allowed);
+    }
+
+    /* refresh current efficiency */
+    pbthp_rqinfo->_min[curr_idx].curr_eff.curr_min_eff = curr_min;
+
+    /******************************************************
+     * update for w/ concerns of affinity
+     *****************************************************/
+    if (likely(!list_empty(&pbthp_rqinfo->_min_a_head))) {
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_a_head) {
+            if (lh == &pbthp_rqinfo->_min[curr_idx].list_a) {
+                list_del(lh);
+                break;
+            }
+        }
+
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_a_head) {
+            if (list_entry(lh,
+                           struct t_store,
+                           list_a)->curr_eff.curr_min_eff > curr_min)
+            {
+                list_add_tail(&pbthp_rqinfo->_min[curr_idx].list_a, lh);
+                break;
+            }
+        }
+
+        /* this is the biggest */
+        if (lh == &pbthp_rqinfo->_min_a_head) {
+            list_add_tail(&pbthp_rqinfo->_min[curr_idx].list_a, lh);
+        }
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_min_cc_a,
+                        sizeof(pbthp_rqinfo->_min_cc_a));
+    memset(pbthp_rqinfo->_min_cc_a, 0, sizeof(pbthp_rqinfo->_min_cc_a));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_a_head) {
+		pbthp_rqinfo->_min_cc_a[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_min_cc_a[num_entries-1] +
+			 list_entry(lh, struct t_store, list_a)->curr_eff.curr_min_eff):
+			(list_entry(lh, struct t_store, list_a)->curr_eff.curr_min_eff);
+        num_entries++;
+    }
+
+    if (!is_na && likely(!is_chg))
+        return;
+
+	/* always delete first */
+	list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_na_head) {
+		if (lh == &pbthp_rqinfo->_min[curr_idx].list_na) {
+			list_del(lh);
+			break;
+		}
+	}
+
+	/* re-put onto min na_ll in order */
+    if (is_na) {
+		list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_na_head) {
+			if (list_entry(lh,
+						   struct t_store,
+						   list_na)->curr_eff.curr_min_eff > curr_min)
+			{
+				list_add_tail(&pbthp_rqinfo->_min[curr_idx].list_na, lh);
+				break;
+			}
+		}
+
+		/* this is the biggest */
+		if (lh == &pbthp_rqinfo->_min_na_head) {
+			list_add_tail(&pbthp_rqinfo->_min[curr_idx].list_na, lh);
+		}
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_min_cc_na,
+                        sizeof(pbthp_rqinfo->_min_cc_na));
+    memset(pbthp_rqinfo->_min_cc_na, 0, sizeof(pbthp_rqinfo->_min_cc_na));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_na_head) {
+		pbthp_rqinfo->_min_cc_na[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_min_cc_na[num_entries-1] +
+			 list_entry(lh, struct t_store, list_na)->curr_eff.curr_min_eff):
+			(list_entry(lh, struct t_store, list_na)->curr_eff.curr_min_eff);
+        num_entries++;
+    }
+}
+
+static inline void insert_to_chain_max (
+    struct bthp_rqinfo *pbthp_rqinfo,
+    int new_idx,
+    struct task_struct *p,
+    unsigned long curr_max
+    )
+{
+    unsigned int num_pinned = cpumask_weight (&p->cpus_allowed);
+    bool is_na = (num_pinned == 0 || num_pinned > 1);
+
+    struct list_head *lh, *lh_next;
+    int num_entries;
+
+    /* refresh current efficiency */
+    pbthp_rqinfo->_max[new_idx].curr_eff.curr_max_eff = curr_max;
+    pbthp_rqinfo->_max[new_idx].task = p;
+    cpumask_copy(&pbthp_rqinfo->_max[new_idx].last_cpumask, &p->cpus_allowed);
+
+    /******************************************************
+     * update for w/ concerns of affinity
+     *****************************************************/
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_a_head) {
+        if (list_entry(lh,
+                       struct t_store,
+                       list_a)->curr_eff.curr_max_eff < curr_max)
+        {
+            list_add_tail(&pbthp_rqinfo->_max[new_idx].list_a, lh);
+            break;
+        }
+    }
+
+    /* this is the smallest */
+    if (lh == &pbthp_rqinfo->_max_a_head) {
+        list_add_tail(&pbthp_rqinfo->_max[new_idx].list_a, lh);
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_max_cc_a,
+                        sizeof(pbthp_rqinfo->_max_cc_a));
+    memset(pbthp_rqinfo->_max_cc_a, 0, sizeof(pbthp_rqinfo->_max_cc_a));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_a_head) {
+		pbthp_rqinfo->_max_cc_a[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_max_cc_a[num_entries-1] +
+			 list_entry(lh, struct t_store, list_a)->curr_eff.curr_max_eff):
+			(list_entry(lh, struct t_store, list_a)->curr_eff.curr_max_eff);
+        num_entries++;
+    }
+
+    if (!is_na)
+        return;
+
+    /******************************************************
+     * update for w/o concerns of affinity
+     *****************************************************/
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_na_head) {
+        if (list_entry(lh,
+                       struct t_store,
+                       list_na)->curr_eff.curr_max_eff < curr_max)
+        {
+            list_add_tail(&pbthp_rqinfo->_max[new_idx].list_na, lh);
+            break;
+        }
+    }
+
+    /* this is the smallest */
+    if (lh == &pbthp_rqinfo->_max_na_head) {
+        list_add_tail(&pbthp_rqinfo->_max[new_idx].list_na, lh);
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_max_cc_na,
+                        sizeof(pbthp_rqinfo->_max_cc_na));
+    memset(pbthp_rqinfo->_max_cc_na, 0, sizeof(pbthp_rqinfo->_max_cc_na));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_na_head) {
+		pbthp_rqinfo->_max_cc_na[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_max_cc_na[num_entries-1] +
+			 list_entry(lh, struct t_store, list_na)->curr_eff.curr_max_eff):
+			(list_entry(lh, struct t_store, list_na)->curr_eff.curr_max_eff);
+        num_entries++;
+    }
+}
+
+static inline void insert_to_chain_min (
+    struct bthp_rqinfo *pbthp_rqinfo,
+    int new_idx,
+    struct task_struct *p,
+    unsigned long curr_min
+    )
+{
+    unsigned int num_pinned = cpumask_weight (&p->cpus_allowed);
+    bool is_na = (num_pinned == 0 || num_pinned > 1);
+
+    struct list_head *lh, *lh_next;
+    int num_entries;
+
+    /* refresh current efficiency */
+    pbthp_rqinfo->_min[new_idx].curr_eff.curr_min_eff = curr_min;
+    pbthp_rqinfo->_min[new_idx].task = p;
+    cpumask_copy(&pbthp_rqinfo->_min[new_idx].last_cpumask, &p->cpus_allowed);
+
+    /******************************************************
+     * update for w/ concerns of affinity
+     *****************************************************/
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_a_head) {
+        if (list_entry(lh,
+                       struct t_store,
+                       list_a)->curr_eff.curr_min_eff > curr_min)
+        {
+            list_add_tail(&pbthp_rqinfo->_min[new_idx].list_a, lh);
+            break;
+        }
+    }
+
+    /* this is the biggest */
+    if (lh == &pbthp_rqinfo->_min_a_head) {
+        list_add_tail(&pbthp_rqinfo->_min[new_idx].list_a, lh);
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_min_cc_a,
+                        sizeof(pbthp_rqinfo->_min_cc_a));
+    memset(pbthp_rqinfo->_min_cc_a, 0, sizeof(pbthp_rqinfo->_min_cc_a));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_a_head) {
+		pbthp_rqinfo->_min_cc_a[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_min_cc_a[num_entries-1] +
+			 list_entry(lh, struct t_store, list_a)->curr_eff.curr_min_eff):
+			(list_entry(lh, struct t_store, list_a)->curr_eff.curr_min_eff);
+        num_entries++;
+    }
+
+    if (!is_na)
+        return;
+
+    /******************************************************
+     * update for w/o concerns of affinity
+     *****************************************************/
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_na_head) {
+        if (list_entry(lh,
+                       struct t_store,
+                       list_na)->curr_eff.curr_min_eff > curr_min)
+        {
+            list_add_tail(&pbthp_rqinfo->_min[new_idx].list_na, lh);
+            break;
+        }
+    }
+
+    /* this is the biggest */
+    if (lh == &pbthp_rqinfo->_min_na_head) {
+        list_add_tail(&pbthp_rqinfo->_min[new_idx].list_na, lh);
+    }
+
+    /* re-new the cc stats */
+    arch_prefetch_range(pbthp_rqinfo->_min_cc_na,
+                        sizeof(pbthp_rqinfo->_min_cc_na));
+    memset(pbthp_rqinfo->_min_cc_na, 0, sizeof(pbthp_rqinfo->_min_cc_na));
+    num_entries = 0;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_na_head) {
+		pbthp_rqinfo->_min_cc_na[num_entries] =
+			num_entries?
+			(pbthp_rqinfo->_min_cc_na[num_entries-1] +
+			 list_entry(lh, struct t_store, list_na)->curr_eff.curr_min_eff):
+			(list_entry(lh, struct t_store, list_na)->curr_eff.curr_min_eff);
+        num_entries++;
+    }
+}
+
+static inline void delete_in_chain_max (
+    struct bthp_rqinfo *pbthp_rqinfo,
+    int curr_idx
+    )
+{
+    struct list_head *lh, *lh_next;
+    int num_entries;
+    bool is_found;
+
+    /* remove all even duplicate(?) in a_ll first */
+    is_found = false;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_a_head) {
+        if (lh == &pbthp_rqinfo->_max[curr_idx].list_a) {
+            list_del(lh);
+            is_found = true;
+        }
+    }
+
+    /* re-new the cc stats if chain is modified */
+    if (is_found) {
+        arch_prefetch_range(pbthp_rqinfo->_max_cc_a,
+                            sizeof(pbthp_rqinfo->_max_cc_a));
+        memset(pbthp_rqinfo->_max_cc_a, 0, sizeof(pbthp_rqinfo->_max_cc_a));
+        num_entries = 0;
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_a_head) {
+			pbthp_rqinfo->_max_cc_a[num_entries] =
+				num_entries?
+				(pbthp_rqinfo->_max_cc_a[num_entries-1] +
+				 list_entry(lh, struct t_store, list_a)->curr_eff.curr_max_eff):
+				(list_entry(lh, struct t_store, list_a)->curr_eff.curr_max_eff);
+            num_entries++;
+        }
+    }
+
+    /* remove all even duplicate(?) in na_ll first */
+    is_found = false;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_na_head) {
+        if (lh == &pbthp_rqinfo->_max[curr_idx].list_na) {
+            list_del(lh);
+            is_found = true;
+        }
+    }
+
+    /* re-new the cc stats if chain is modified */
+    if (is_found) {
+        arch_prefetch_range(pbthp_rqinfo->_max_cc_na,
+                            sizeof(pbthp_rqinfo->_max_cc_na));
+        memset(pbthp_rqinfo->_max_cc_na, 0, sizeof(pbthp_rqinfo->_max_cc_na));
+        num_entries = 0;
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_max_na_head) {
+			pbthp_rqinfo->_max_cc_na[num_entries] =
+				num_entries?
+				(pbthp_rqinfo->_max_cc_na[num_entries-1] +
+				 list_entry(lh, struct t_store, list_na)->curr_eff.curr_max_eff):
+				(list_entry(lh, struct t_store, list_na)->curr_eff.curr_max_eff);
+            num_entries++;
+        }
+    }
+}
+
+static inline void delete_in_chain_min (
+    struct bthp_rqinfo *pbthp_rqinfo,
+    int curr_idx
+    )
+{
+    struct list_head *lh, *lh_next;
+    int num_entries;
+    bool is_found;
+
+    /* remove all even duplicate(?) in a_ll first */
+    is_found = false;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_a_head) {
+        if (lh == &pbthp_rqinfo->_min[curr_idx].list_a) {
+            list_del(lh);
+            is_found = true;
+        }
+    }
+
+    /* re-new the cc stats if chain is modified */
+    if (is_found) {
+        arch_prefetch_range(pbthp_rqinfo->_min_cc_a,
+                            sizeof(pbthp_rqinfo->_min_cc_a));
+        memset(pbthp_rqinfo->_min_cc_a, 0, sizeof(pbthp_rqinfo->_min_cc_a));
+        num_entries = 0;
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_a_head) {
+			pbthp_rqinfo->_min_cc_a[num_entries] =
+				num_entries?
+				(pbthp_rqinfo->_min_cc_a[num_entries-1] +
+				 list_entry(lh, struct t_store, list_a)->curr_eff.curr_min_eff):
+				(list_entry(lh, struct t_store, list_a)->curr_eff.curr_min_eff);
+            num_entries++;
+        }
+    }
+
+    /* remove all even duplicate(?) in na_ll first */
+    is_found = false;
+    list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_na_head) {
+        if (lh == &pbthp_rqinfo->_min[curr_idx].list_na) {
+            list_del(lh);
+            is_found = true;
+        }
+    }
+
+    /* re-new the cc stats if chain is modified */
+    if (is_found) {
+        arch_prefetch_range(pbthp_rqinfo->_min_cc_na,
+                            sizeof(pbthp_rqinfo->_min_cc_na));
+        memset(pbthp_rqinfo->_min_cc_na, 0, sizeof(pbthp_rqinfo->_min_cc_na));
+        num_entries = 0;
+        list_for_each_safe(lh, lh_next, &pbthp_rqinfo->_min_na_head) {
+			pbthp_rqinfo->_min_cc_na[num_entries] =
+				num_entries?
+				(pbthp_rqinfo->_min_cc_na[num_entries-1] +
+				 list_entry(lh, struct t_store, list_na)->curr_eff.curr_min_eff):
+				(list_entry(lh, struct t_store, list_na)->curr_eff.curr_min_eff);
+            num_entries++;
+        }
+    }
+}
+
+static inline void evaluate_efficiency_chain_in (
+     struct task_struct *p,
+     struct rq *eval_rq
+    )
+{
+   unsigned long curr_eff_max = 0, curr_eff_min = 0;
+   int idx, idx_avail;
+
+   /* update current efficiency first */
+   eval_curr_efficiency (p, &curr_eff_max, &curr_eff_min);
+
+   /* look up task in max group */
+   arch_prefetch_range (eval_rq->bthp_rqinfo._max,
+                        sizeof(eval_rq->bthp_rqinfo._max));
+   for (idx = MAX_TRACKED_TASKS-1, idx_avail = MAX_TRACKED_TASKS;
+        idx >= 0;
+        idx--)
+   {
+       if (idx_avail == MAX_TRACKED_TASKS &&
+           !eval_rq->bthp_rqinfo._max[idx].task)
+       {
+           /* found one blank */
+           idx_avail = idx;
+       }
+
+       if (eval_rq->bthp_rqinfo._max[idx].task == p) {
+           _do_update (max, &eval_rq->bthp_rqinfo, idx, curr_eff_max);
+           break;
+       }
+   }
+
+   /* insert new one to max ll */
+   if (idx < 0 && idx_avail != MAX_TRACKED_TASKS) {
+       _do_insert (max, &eval_rq->bthp_rqinfo, idx_avail, p, curr_eff_max);
+   }
+
+   /* look up task in min group */
+   arch_prefetch_range (eval_rq->bthp_rqinfo._min,
+                        sizeof(eval_rq->bthp_rqinfo._min));
+   for (idx = MAX_TRACKED_TASKS-1, idx_avail = MAX_TRACKED_TASKS;
+        idx >= 0;
+        idx--)
+   {
+       if (idx_avail == MAX_TRACKED_TASKS &&
+           !eval_rq->bthp_rqinfo._min[idx].task)
+       {
+           /* found one blank */
+           idx_avail = idx;
+       }
+
+       if (eval_rq->bthp_rqinfo._min[idx].task == p) {
+           _do_update (min, &eval_rq->bthp_rqinfo, idx, curr_eff_min);
+           break;
+       }
+   }
+
+   /* insert new one to min ll */
+   if (idx < 0 && idx_avail != MAX_TRACKED_TASKS) {
+       _do_insert (min, &eval_rq->bthp_rqinfo, idx_avail, p, curr_eff_min);
+   }
+}
+
+static inline void evaluate_efficiency_chain_out (
+     struct task_struct *p,
+     struct rq *eval_rq
+    )
+{
+    int idx;
+
+    /* look up task in max group */
+    arch_prefetch_range (eval_rq->bthp_rqinfo._max,
+                         sizeof(eval_rq->bthp_rqinfo._max));
+    for (idx = MAX_TRACKED_TASKS-1; idx >= 0; idx--) {
+        if (eval_rq->bthp_rqinfo._max[idx].task == p) {
+            _do_delete (max, &eval_rq->bthp_rqinfo, idx);
+            memset(&eval_rq->bthp_rqinfo._max[idx], 0, sizeof(struct t_store));
+        }
+    }
+
+    /* look up task in min group */
+    arch_prefetch_range (eval_rq->bthp_rqinfo._min,
+                         sizeof(eval_rq->bthp_rqinfo._min));
+    for (idx = MAX_TRACKED_TASKS-1; idx >= 0; idx--) {
+        if (eval_rq->bthp_rqinfo._min[idx].task == p) {
+            _do_delete (min, &eval_rq->bthp_rqinfo, idx);
+            memset(&eval_rq->bthp_rqinfo._min[idx], 0, sizeof(struct t_store));
+        }
+    }
+}
+
+static inline void bthp_info_queued (
+    struct rq *rq,
+    struct task_struct *p
+    )
+{
+    if (unlikely(!is_bthp_en ()))
+        return;
+
+    if (!p->bthp_tskinfo.last_queued) {
+        p->bthp_tskinfo.last_queued = ktime_to_ns(ktime_get());
+    }
+}
+
+static inline void bthp_info_dequeued (
+    struct rq *rq,
+    struct task_struct *p
+    )
+{
+    if (unlikely(!is_bthp_en ()))
+        return;
+
+    /* un-vote for execution power critical on source rq */
+    if (atomic_cmpxchg((atomic_t *)&p->bthp_tskinfo.perf_is_downgrading,
+                       1,
+                       0))
+    {
+        atomic_add_unless((atomic_t *)&(rq->bthp_rqinfo.votes_for_perf_up),
+                          -1,
+                          0);
+    }
+
+    /* refresh bthp-rq stats (remove a task in chain) */
+    _do_evaluate (efficiency, out, p, rq);
+
+    /* for still running task, all stats are brought to the next rq */
+    if (p->state != TASK_RUNNING) {
+        /* erase all memory happened at source rq */
+        memset(&p->bthp_tskinfo, 0, sizeof(p->bthp_tskinfo));
+    }
+}
+
+static inline void bthp_info_arrive (
+    struct task_struct *t
+    )
+{
+    unsigned long long now = ktime_to_ns(ktime_get()), delta = 0;
+
+    if (t->bthp_tskinfo.last_queued) {
+        delta = now - t->bthp_tskinfo.last_queued;
+
+        /* update cumulative task latency */
+        update_task_latency(t, delta);
+    }
+    t->bthp_tskinfo.last_queued = 0;
+    t->bthp_tskinfo.last_arrival = now;
+}
+
+static inline void bthp_info_depart (
+    struct task_struct *t
+    )
+{
+    unsigned long long now = ktime_to_ns(ktime_get());
+    unsigned long long delta = now - t->bthp_tskinfo.last_arrival;
+    struct rq *rq = task_rq(t);
+
+    if (t->state == TASK_RUNNING) {
+        /* the task uses up its time slice or preempted,
+         * and hence, got enqueued again
+         */
+        t->bthp_tskinfo.last_queued = now;
+
+        /* update cumulative task efficiency */
+        update_task_efficiency(t, delta);
+
+        /* refresh bthp-rq stats (either add or update a task in chain) */
+        _do_evaluate (efficiency, in, t, rq);
+
+        /* vote for execution power critical */
+        if (is_task_efficiency_critical(t) || is_task_latency_critical(t)) {
+            if (!atomic_cmpxchg(
+                    (atomic_t *)&t->bthp_tskinfo.perf_is_downgrading,
+                    0,
+                    1))
+            {
+                atomic_inc((atomic_t *)&(rq->bthp_rqinfo.votes_for_perf_up));
+            }
+
+        } else {
+            if (atomic_cmpxchg(
+                    (atomic_t *)&t->bthp_tskinfo.perf_is_downgrading,
+                    1,
+                    0))
+            {
+                atomic_add_unless(
+                   (atomic_t *)&(rq->bthp_rqinfo.votes_for_perf_up),
+                   -1,
+                   0);
+            }
+        }
+
+        t->bthp_tskinfo.unfinished++;
+
+    } else {
+        /* dead and blocked, both are intercepted
+         * by dequeued when reschedule...
+         */
+    }
+}
+
+static inline void bthp_info_switch (
+    struct task_struct *prev,
+    struct task_struct *next
+    )
+{
+	struct rq *rq = task_rq(prev);
+
+    if (unlikely(!is_bthp_en ()))
+        return;
+
+    if (likely(*(volatile unsigned long **)&t_rate != NULL)) {
+
+        /* the prev task gotta to be enqueued again */
+        if (prev != rq->idle) {
+            bthp_info_depart(prev);
+        }
+
+        /* the next task gotta to be dequeued and take over cpu computing */
+        if (next != rq->idle)
+            bthp_info_arrive(next);
+    }
+}
+
+/* check busy/idle index of SD_CPU_INIT */
+void cpus_load_stats (
+    int cpu,
+    unsigned long *this_load,
+    unsigned long *this_avg_load_per_task,
+    unsigned long *all_avg_load
+    )
+{
+    int online_cpu;
+    unsigned long all_power = 0;
+
+    BUG_ON (this_load == NULL ||
+            this_avg_load_per_task == NULL ||
+            all_avg_load == NULL);
+
+    *this_load = *this_avg_load_per_task = *all_avg_load = 0UL;
+
+    for_each_online_cpu(online_cpu) {
+        if (online_cpu == cpu) {
+            *this_load =
+               (source_load(online_cpu, 2) *
+                SCHED_LOAD_SCALE) /
+               cpu_rq(online_cpu)->cpu_power;
+            *this_avg_load_per_task =
+               cpu_rq(online_cpu)->load.weight /
+               cpu_rq(online_cpu)->nr_running;
+
+            all_power += cpu_rq(online_cpu)->cpu_power;
+            *all_avg_load += *this_load;
+
+        } else {
+            all_power += cpu_rq(online_cpu)->cpu_power;
+            *all_avg_load +=
+               (target_load(online_cpu,
+                            idle_cpu(online_cpu)?
+                            1:
+                            2) *
+                SCHED_LOAD_SCALE) /
+               cpu_rq(online_cpu)->cpu_power;
+        }
+    }
+
+
+    if (likely(all_power)) {
+        *all_avg_load = (*all_avg_load * SCHED_LOAD_SCALE) / all_power;
+    }
+}
+EXPORT_SYMBOL(cpus_load_stats);
+#endif
+
+/* 27 ~= 134217728ns = 134.2ms
+ * 26 ~=  67108864ns =  67.1ms
+ * 25 ~=  33554432ns =  33.5ms
+ * 24 ~=  16777216ns =  16.8ms */
+#define NR_AVE_PERIOD_EXP	27
+#define NR_AVE_SCALE(x)		((x) << FSHIFT)
+#define NR_AVE_PERIOD		(1 << NR_AVE_PERIOD_EXP)
+#define NR_AVE_DIV_PERIOD(x)	((x) >> NR_AVE_PERIOD_EXP)
+
+static inline unsigned int do_avg_nr_running(struct rq *rq)
+{
+	s64 nr, deltax;
+	unsigned int ave_nr_running = rq->ave_nr_running;
+
+	deltax = rq->clock_task - rq->nr_last_stamp;
+	nr = NR_AVE_SCALE(rq->nr_running);
+
+	if (deltax > NR_AVE_PERIOD)
+		ave_nr_running = nr;
+	else
+		ave_nr_running +=
+			NR_AVE_DIV_PERIOD(deltax * (nr - ave_nr_running));
+
+	return ave_nr_running;
+}
+
 static void inc_nr_running(struct rq *rq)
 {
+	write_seqcount_begin(&rq->ave_seqcnt);
+	rq->ave_nr_running = do_avg_nr_running(rq);
+	rq->nr_last_stamp = rq->clock_task;
 	rq->nr_running++;
+	write_seqcount_end(&rq->ave_seqcnt);
 }
 
 static void dec_nr_running(struct rq *rq)
 {
+	write_seqcount_begin(&rq->ave_seqcnt);
+	rq->ave_nr_running = do_avg_nr_running(rq);
+	rq->nr_last_stamp = rq->clock_task;
 	rq->nr_running--;
+	write_seqcount_end(&rq->ave_seqcnt);
 }
 
 static void set_load_weight(struct task_struct *p)
@@ -1787,6 +3106,9 @@ static void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	update_rq_clock(rq);
 	sched_info_queued(p);
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+    bthp_info_queued(rq, p);
+#endif
 	p->sched_class->enqueue_task(rq, p, flags);
 }
 
@@ -1794,6 +3116,9 @@ static void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 {
 	update_rq_clock(rq);
 	sched_info_dequeued(p);
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+    bthp_info_dequeued(rq, p);
+#endif
 	p->sched_class->dequeue_task(rq, p, flags);
 }
 
@@ -2074,6 +3399,19 @@ void sched_set_stop_task(int cpu, struct task_struct *stop)
 		 * it can die in pieces.
 		 */
 		old_stop->sched_class = &rt_sched_class;
+
+		if (old_stop->state == TASK_RUNNING)
+			pr_warn("KERNEL_WARNING: %s(%p): old_stop->state == TASK_RUNNING\n",
+					old_stop->comm, old_stop);
+		if (old_stop->on_rq == 1)
+			pr_warn("KERNEL_WARNING: %s(%p): old_stop->on_rq == 1\n",
+					old_stop->comm, old_stop);
+
+		/*
+		 * also reset the schedule state as enqueue-able
+		 */
+		old_stop->on_rq = 0;
+		set_mb(old_stop->state, TASK_INTERRUPTIBLE);
 	}
 }
 
@@ -2218,7 +3556,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	 * a task's CPU. ->pi_lock for waking tasks, rq->lock for runnable tasks.
 	 *
 	 * sched_move_task() holds both and thus holding either pins the cgroup,
-	 * see set_task_rq().
+	 * see task_group().
 	 *
 	 * Furthermore, all task_rq users should acquire both locks, see
 	 * task_rq_lock().
@@ -2335,7 +3673,7 @@ unsigned long wait_task_inactive(struct task_struct *p, long match_state)
 		 * yield - it could be a while.
 		 */
 		if (unlikely(on_rq)) {
-			ktime_t to = ktime_set(0, NSEC_PER_SEC/HZ);
+			ktime_t to = ktime_set(0, NSEC_PER_MSEC);
 
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			schedule_hrtimeout(&to, HRTIMER_MODE_REL);
@@ -3019,6 +4357,9 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 		    struct task_struct *next)
 {
 	sched_info_switch(prev, next);
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+    bthp_info_switch(prev, next);
+#endif
 	perf_event_task_sched_out(prev, next);
 	fire_sched_out_preempt_notifiers(prev, next);
 	prepare_lock_switch(rq, next);
@@ -3250,6 +4591,33 @@ unsigned long nr_iowait(void)
 
 	for_each_possible_cpu(i)
 		sum += atomic_read(&cpu_rq(i)->nr_iowait);
+
+	return sum;
+}
+
+unsigned long avg_nr_running(void)
+{
+	unsigned long i, sum = 0;
+	unsigned int seqcnt, ave_nr_running;
+
+	for_each_online_cpu(i) {
+		struct rq *q = cpu_rq(i);
+
+		/*
+		 * Update average to avoid reading stalled value if there were
+		 * no run-queue changes for a long time. On the other hand if
+		 * the changes are happening right now, just read current value
+		 * directly.
+		 */
+		seqcnt = read_seqcount_begin(&q->ave_seqcnt);
+		ave_nr_running = do_avg_nr_running(q);
+		if (read_seqcount_retry(&q->ave_seqcnt, seqcnt)) {
+			read_seqcount_begin(&q->ave_seqcnt);
+			ave_nr_running = q->ave_nr_running;
+		}
+
+		sum += ave_nr_running;
+	}
 
 	return sum;
 }
@@ -4197,8 +5565,9 @@ static noinline void __schedule_bug(struct task_struct *prev)
 
 	if (regs)
 		show_regs(regs);
-	else
-		dump_stack();
+
+	pr_err("dump call stack:\n");
+	dump_stack();
 }
 
 /*
@@ -5857,9 +7226,18 @@ void sched_show_task(struct task_struct *p)
 #ifdef CONFIG_DEBUG_STACK_USAGE
 	free = stack_not_used(p);
 #endif
-	printk(KERN_CONT "%5lu %5d %6d 0x%08lx\n", free,
+	printk(KERN_CONT "%5lu %5d %6d 0x%08lx c%d %llu\n", free,
 		task_pid_nr(p), task_pid_nr(p->real_parent),
-		(unsigned long)task_thread_info(p)->flags);
+		(unsigned long)task_thread_info(p)->flags, p->on_cpu,
+		div64_u64(task_rq(p)->clock - p->sched_info.last_arrival, NSEC_PER_MSEC));
+
+#if defined(CONFIG_DEBUG_MUTEXES)
+	if (state == TASK_UNINTERRUPTIBLE)
+		if (p->blocked_by)
+			printk(KERN_CONT "  blocked by %s (%d) for %u ms\n",
+				p->blocked_by->comm, p->blocked_by->tgid,
+				jiffies_to_msecs(jiffies - p->blocked_since));
+#endif
 
 	show_stack(p, NULL);
 }
@@ -6510,7 +7888,7 @@ static int __cpuinit sched_cpu_active(struct notifier_block *nfb,
 				      unsigned long action, void *hcpu)
 {
 	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_ONLINE:
+	case CPU_STARTING:
 	case CPU_DOWN_FAILED:
 		set_cpu_active((long)hcpu, true);
 		return NOTIFY_OK;
@@ -8113,6 +9491,14 @@ void __init sched_init(void)
 		init_tg_rt_entry(&root_task_group, &rq->rt, NULL, i, NULL);
 #endif
 
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+        memset(&rq->bthp_rqinfo, 0, sizeof(rq->bthp_rqinfo));
+        INIT_LIST_HEAD(&rq->bthp_rqinfo._max_a_head);
+        INIT_LIST_HEAD(&rq->bthp_rqinfo._max_na_head);
+        INIT_LIST_HEAD(&rq->bthp_rqinfo._min_a_head);
+        INIT_LIST_HEAD(&rq->bthp_rqinfo._min_na_head);
+#endif
+
 		for (j = 0; j < CPU_LOAD_IDX_MAX; j++)
 			rq->cpu_load[j] = 0;
 
@@ -8185,6 +9571,7 @@ void __init sched_init(void)
 	atomic_set(&nohz.load_balancer, nr_cpu_ids);
 	atomic_set(&nohz.first_pick_cpu, nr_cpu_ids);
 	atomic_set(&nohz.second_pick_cpu, nr_cpu_ids);
+	nohz.next_balance = jiffies;
 #endif
 	/* May be allocated at isolcpus cmdline parse time */
 	if (cpu_isolated_map == NULL)
@@ -8202,12 +9589,23 @@ static inline int preempt_count_equals(int preempt_offset)
 	return (nested == preempt_offset);
 }
 
+static int __might_sleep_init_called;
+int __init __might_sleep_init(void)
+{
+	__might_sleep_init_called = 1;
+	return 0;
+}
+early_initcall(__might_sleep_init);
+
 void __might_sleep(const char *file, int line, int preempt_offset)
 {
 	static unsigned long prev_jiffy;	/* ratelimiting */
 
 	if ((preempt_count_equals(preempt_offset) && !irqs_disabled()) ||
-	    system_state != SYSTEM_RUNNING || oops_in_progress)
+	    oops_in_progress)
+		return;
+	if (system_state != SYSTEM_RUNNING &&
+	    (!__might_sleep_init_called || system_state != SYSTEM_BOOTING))
 		return;
 	if (time_before(jiffies, prev_jiffy + HZ) && prev_jiffy)
 		return;
@@ -8573,6 +9971,7 @@ void sched_destroy_group(struct task_group *tg)
  */
 void sched_move_task(struct task_struct *tsk)
 {
+	struct task_group *tg;
 	int on_rq, running;
 	unsigned long flags;
 	struct rq *rq;
@@ -8586,6 +9985,12 @@ void sched_move_task(struct task_struct *tsk)
 		dequeue_task(rq, tsk, 0);
 	if (unlikely(running))
 		tsk->sched_class->put_prev_task(rq, tsk);
+
+	tg = container_of(task_subsys_state_check(tsk, cpu_cgroup_subsys_id,
+				lockdep_is_held(&tsk->sighand->siglock)),
+			  struct task_group, css);
+	tg = autogroup_task_group(tsk, tg);
+	tsk->sched_task_group = tg;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	if (tsk->sched_class->task_move_group)
@@ -8954,6 +10359,20 @@ cpu_cgroup_destroy(struct cgroup_subsys *ss, struct cgroup *cgrp)
 }
 
 static int
+cpu_cgroup_allow_attach(struct cgroup *cgrp, struct task_struct *tsk)
+{
+	const struct cred *cred = current_cred(), *tcred;
+
+	tcred = __task_cred(tsk);
+
+	if ((current != tsk) && !capable(CAP_SYS_NICE) &&
+	    cred->euid != tcred->uid && cred->euid != tcred->suid)
+		return -EACCES;
+
+	return 0;
+}
+
+static int
 cpu_cgroup_can_attach_task(struct cgroup *cgrp, struct task_struct *tsk)
 {
 #ifdef CONFIG_RT_GROUP_SCHED
@@ -9058,6 +10477,7 @@ struct cgroup_subsys cpu_cgroup_subsys = {
 	.name		= "cpu",
 	.create		= cpu_cgroup_create,
 	.destroy	= cpu_cgroup_destroy,
+	.allow_attach	= cpu_cgroup_allow_attach,
 	.can_attach_task = cpu_cgroup_can_attach_task,
 	.attach_task	= cpu_cgroup_attach_task,
 	.exit		= cpu_cgroup_exit,
@@ -9084,7 +10504,29 @@ struct cpuacct {
 	u64 __percpu *cpuusage;
 	struct percpu_counter cpustat[CPUACCT_STAT_NSTATS];
 	struct cpuacct *parent;
+	struct cpuacct_charge_calls *cpufreq_fn;
+	void *cpuacct_data;
 };
+
+static struct cpuacct *cpuacct_root;
+
+/* Default calls for cpufreq accounting */
+static struct cpuacct_charge_calls *cpuacct_cpufreq;
+int cpuacct_register_cpufreq(struct cpuacct_charge_calls *fn)
+{
+	cpuacct_cpufreq = fn;
+
+	/*
+	 * Root node is created before platform can register callbacks,
+	 * initalize here.
+	 */
+	if (cpuacct_root && fn) {
+		cpuacct_root->cpufreq_fn = fn;
+		if (fn->init)
+			fn->init(&cpuacct_root->cpuacct_data);
+	}
+	return 0;
+}
 
 struct cgroup_subsys cpuacct_subsys;
 
@@ -9120,8 +10562,16 @@ static struct cgroup_subsys_state *cpuacct_create(
 		if (percpu_counter_init(&ca->cpustat[i], 0))
 			goto out_free_counters;
 
+	ca->cpufreq_fn = cpuacct_cpufreq;
+
+	/* If available, have platform code initalize cpu frequency table */
+	if (ca->cpufreq_fn && ca->cpufreq_fn->init)
+		ca->cpufreq_fn->init(&ca->cpuacct_data);
+
 	if (cgrp->parent)
 		ca->parent = cgroup_ca(cgrp->parent);
+	else
+		cpuacct_root = ca;
 
 	return &ca->css;
 
@@ -9249,6 +10699,32 @@ static int cpuacct_stats_show(struct cgroup *cgrp, struct cftype *cft,
 	return 0;
 }
 
+static int cpuacct_cpufreq_show(struct cgroup *cgrp, struct cftype *cft,
+		struct cgroup_map_cb *cb)
+{
+	struct cpuacct *ca = cgroup_ca(cgrp);
+	if (ca->cpufreq_fn && ca->cpufreq_fn->cpufreq_show)
+		ca->cpufreq_fn->cpufreq_show(ca->cpuacct_data, cb);
+
+	return 0;
+}
+
+/* return total cpu power usage (milliWatt second) of a group */
+static u64 cpuacct_powerusage_read(struct cgroup *cgrp, struct cftype *cft)
+{
+	int i;
+	struct cpuacct *ca = cgroup_ca(cgrp);
+	u64 totalpower = 0;
+
+	if (ca->cpufreq_fn && ca->cpufreq_fn->power_usage)
+		for_each_present_cpu(i) {
+			totalpower += ca->cpufreq_fn->power_usage(
+					ca->cpuacct_data);
+		}
+
+	return totalpower;
+}
+
 static struct cftype files[] = {
 	{
 		.name = "usage",
@@ -9262,6 +10738,14 @@ static struct cftype files[] = {
 	{
 		.name = "stat",
 		.read_map = cpuacct_stats_show,
+	},
+	{
+		.name =  "cpufreq",
+		.read_map = cpuacct_cpufreq_show,
+	},
+	{
+		.name = "power",
+		.read_u64 = cpuacct_powerusage_read
 	},
 };
 
@@ -9292,6 +10776,10 @@ static void cpuacct_charge(struct task_struct *tsk, u64 cputime)
 	for (; ca; ca = ca->parent) {
 		u64 *cpuusage = per_cpu_ptr(ca->cpuusage, cpu);
 		*cpuusage += cputime;
+
+		/* Call back into platform code to account for CPU speeds */
+		if (ca->cpufreq_fn && ca->cpufreq_fn->charge)
+			ca->cpufreq_fn->charge(ca->cpuacct_data, cputime, cpu);
 	}
 
 	rcu_read_unlock();

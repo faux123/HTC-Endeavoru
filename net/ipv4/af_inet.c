@@ -118,13 +118,28 @@
 #include <linux/mroute.h>
 #endif
 
+#ifdef CONFIG_ANDROID_PARANOID_NETWORK
+#include <linux/android_aid.h>
+
+static inline int current_has_network(void)
+{
+	return in_egroup_p(AID_INET) || capable(CAP_NET_RAW);
+}
+#else
+static inline int current_has_network(void)
+{
+	return 1;
+}
+#endif
 
 /* The inetsw table contains everything that inet_create needs to
  * build a new socket.
  */
 static struct list_head inetsw[SOCK_MAX];
 static DEFINE_SPINLOCK(inetsw_lock);
-
+//++SSD_RIL
+extern void record_probe_data(struct sock *sk, int type, size_t size, unsigned long long t_pre);
+//--SSD_RIL
 struct ipv4_config ipv4_config;
 EXPORT_SYMBOL(ipv4_config);
 
@@ -258,6 +273,7 @@ static inline int inet_netns_ok(struct net *net, int protocol)
 	return ipprot->netns_ok;
 }
 
+
 /*
  *	Create an inet socket.
  */
@@ -273,6 +289,9 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 	char answer_no_check;
 	int try_loading_module = 0;
 	int err;
+
+	if (!current_has_network())
+		return -EACCES;
 
 	if (unlikely(!inet_ehash_secret))
 		if (sock->type != SOCK_RAW && sock->type != SOCK_DGRAM)
@@ -437,6 +456,11 @@ int inet_release(struct socket *sock)
 		    !(current->flags & PF_EXITING))
 			timeout = sk->sk_lingertime;
 		sock->sk = NULL;
+//++SSD_RIL
+		{
+		   record_probe_data(sk, 6, 0,0);
+	        }
+//--SSD_RIL
 		sk->sk_prot->close(sk, timeout);
 	}
 	return 0;
@@ -543,7 +567,9 @@ int inet_dgram_connect(struct socket *sock, struct sockaddr * uaddr,
 		       int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
-
+//++SSD_RIL
+       int err;
+//--SSD_RIL
 	if (addr_len < sizeof(uaddr->sa_family))
 		return -EINVAL;
 	if (uaddr->sa_family == AF_UNSPEC)
@@ -551,7 +577,15 @@ int inet_dgram_connect(struct socket *sock, struct sockaddr * uaddr,
 
 	if (!inet_sk(sk)->inet_num && inet_autobind(sk))
 		return -EAGAIN;
-	return sk->sk_prot->connect(sk, (struct sockaddr *)uaddr, addr_len);
+//++SSD_RIL
+	err=sk->sk_prot->connect(sk, (struct sockaddr *)uaddr, addr_len);
+       if (0==err)
+       {
+           record_probe_data(sk, 5, 0,0);
+       }
+	return err;
+	//return sk->sk_prot->connect(sk, (struct sockaddr *)uaddr, addr_len);
+//--SSD_RIL
 }
 EXPORT_SYMBOL(inet_dgram_connect);
 
@@ -582,6 +616,8 @@ static long inet_wait_for_connect(struct sock *sk, long timeo)
  *	Connect to a remote host. There is regrettably still a little
  *	TCP 'magic' in here.
  */
+int add_or_remove_port(struct sock *sk, int add_or_remove);	/* SSD_RIL: Garbage_Filter_TCP */
+
 int inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			int addr_len, int flags)
 {
@@ -620,7 +656,16 @@ int inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 		if (err < 0)
 			goto out;
 
+//++SSD_RIL:
+			{
+		   record_probe_data(sk, 4, 0,0);
+			}
+//--SSD_RIL:
 		sock->state = SS_CONNECTING;
+		/* ++SSD_RIL: Garbage_Filter_TCP */
+		if (sk != NULL)
+			add_or_remove_port(sk, 1);
+		/* --SSD_RIL: Garbage_Filter_TCP */
 
 		/* Just entered SS_CONNECTING state; the only
 		 * difference is that return value in non-blocking
@@ -684,6 +729,11 @@ int inet_accept(struct socket *sock, struct socket *newsock, int flags)
 	lock_sock(sk2);
 
 	sock_rps_record_flow(sk2);
+//++SSD_RIL:
+       {
+	   record_probe_data(sk2, 3, 0,0);
+	}
+//--SSD_RIL:
 	WARN_ON(!((1 << sk2->sk_state) &
 		  (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT | TCPF_CLOSE)));
 
@@ -733,15 +783,26 @@ int inet_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 		 size_t size)
 {
 	struct sock *sk = sock->sk;
-
+       int err;
+//++SSD_RIL:
+	unsigned long long t_pre;
+//--SSD_RIL:
 	sock_rps_record_flow(sk);
 
 	/* We may need to bind the socket. */
 	if (!inet_sk(sk)->inet_num && !sk->sk_prot->no_autobind &&
 	    inet_autobind(sk))
 		return -EAGAIN;
+//++SSD_RIL:
+       t_pre=sched_clock();
+       err=sk->sk_prot->sendmsg(iocb, sk, msg, size);
+	if (err >= 0)
+	{
+	   record_probe_data(sk, 1, size,t_pre);
+	}
+	return err;
+//--SSD_RIL:
 
-	return sk->sk_prot->sendmsg(iocb, sk, msg, size);
 }
 EXPORT_SYMBOL(inet_sendmsg);
 
@@ -769,13 +830,22 @@ int inet_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 	struct sock *sk = sock->sk;
 	int addr_len = 0;
 	int err;
-
+//++SSD_RIL:
+	unsigned long long t_pre;
+//--SSD_RIL:
 	sock_rps_record_flow(sk);
-
+//++SSD_RIL:
+       t_pre=sched_clock();
+//--SSD_RIL:
 	err = sk->sk_prot->recvmsg(iocb, sk, msg, size, flags & MSG_DONTWAIT,
 				   flags & ~MSG_DONTWAIT, &addr_len);
 	if (err >= 0)
+	{
 		msg->msg_namelen = addr_len;
+//++SSD_RIL:
+	   record_probe_data(sk, 2, size,t_pre);
+//--SSD_RIL:
+	}
 	return err;
 }
 EXPORT_SYMBOL(inet_recvmsg);
@@ -879,6 +949,7 @@ int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	case SIOCSIFPFLAGS:
 	case SIOCGIFPFLAGS:
 	case SIOCSIFFLAGS:
+	case SIOCKILLADDR:
 		err = devinet_ioctl(net, cmd, (void __user *)arg);
 		break;
 	default:

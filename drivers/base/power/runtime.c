@@ -10,6 +10,9 @@
 #include <linux/sched.h>
 #include <linux/pm_runtime.h>
 #include "power.h"
+/* ++SSD_RIL */
+#include <linux/usb.h>
+/* --SSD_RIL */
 
 static int rpm_resume(struct device *dev, int rpmflags);
 static int rpm_suspend(struct device *dev, int rpmflags);
@@ -28,12 +31,9 @@ static int rpm_suspend(struct device *dev, int rpmflags);
 void update_pm_runtime_accounting(struct device *dev)
 {
 	unsigned long now = jiffies;
-	int delta;
+	unsigned long delta;
 
 	delta = now - dev->power.accounting_timestamp;
-
-	if (delta < 0)
-		delta = 0;
 
 	dev->power.accounting_timestamp = now;
 
@@ -331,6 +331,33 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 			 */
 			if (!(dev->power.timer_expires && time_before_eq(
 			    dev->power.timer_expires, expires))) {
+				//--------------------------------------------------------
+				#ifdef CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+				extern bool Modem_is_QCT_MDM9K(void);
+				if (Modem_is_QCT_MDM9K())
+				{
+					struct usb_device *udev = NULL;
+					extern struct usb_device *mdm_usb1_1_usbdev;
+					extern struct device *mdm_usb1_1_dev;
+					extern struct usb_device *mdm_usb1_usbdev;
+					extern struct device *mdm_usb1_dev;
+
+					if (mdm_usb1_1_dev == dev)
+						udev = mdm_usb1_1_usbdev;
+
+					if (mdm_usb1_dev == dev)
+						udev = mdm_usb1_usbdev;
+
+					if (udev) {
+						if (!(udev->auto_suspend_timer_set)) {
+							udev->auto_suspend_timer_set = 1;
+							dev_err(dev, "%s[%d] dev->power.timer_expires=%lx, expires=%lx\n",
+								__func__, __LINE__, dev->power.timer_expires, expires);
+						}
+					}
+				}
+				#endif	//CONFIG_HTC_QCT_9K_MDM_HSIC_PM_DBG
+				//--------------------------------------------------------
 				dev->power.timer_expires = expires;
 				mod_timer(&dev->power.suspend_timer, expires);
 			}
@@ -410,7 +437,13 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 			 */
 			if ((rpmflags & RPM_AUTO) &&
 			    pm_runtime_autosuspend_expiration(dev) != 0)
+			{
+				//htc_dbg
+				printk(KERN_ERR"%s %s: %s(%d) wake_up_all before goto repeat",dev_driver_string(dev), dev_name(dev), __func__, __LINE__);
+				wake_up_all(&dev->power.wait_queue);
+
 				goto repeat;
+			}
 		} else {
 			pm_runtime_cancel_pending(dev);
 		}
@@ -730,6 +763,9 @@ int pm_schedule_suspend(struct device *dev, unsigned int delay)
 	dev->power.timer_autosuspends = 0;
 	mod_timer(&dev->power.suspend_timer, dev->power.timer_expires);
 
+	//HTC_DBG
+	dev_info(dev, "%s[%d] dev->power.timer_expires =%lx\n", __func__, __LINE__, dev->power.timer_expires);
+
  out:
 	spin_unlock_irqrestore(&dev->power.lock, flags);
 
@@ -752,6 +788,8 @@ int __pm_runtime_idle(struct device *dev, int rpmflags)
 {
 	unsigned long flags;
 	int retval;
+
+	might_sleep_if(!(rpmflags & RPM_ASYNC));
 
 	if (rpmflags & RPM_GET_PUT) {
 		if (!atomic_dec_and_test(&dev->power.usage_count))
@@ -782,6 +820,8 @@ int __pm_runtime_suspend(struct device *dev, int rpmflags)
 	unsigned long flags;
 	int retval;
 
+	might_sleep_if(!(rpmflags & RPM_ASYNC) && !dev->power.irq_safe);
+
 	if (rpmflags & RPM_GET_PUT) {
 		if (!atomic_dec_and_test(&dev->power.usage_count))
 			return 0;
@@ -809,6 +849,8 @@ int __pm_runtime_resume(struct device *dev, int rpmflags)
 {
 	unsigned long flags;
 	int retval;
+
+	might_sleep_if(!(rpmflags & RPM_ASYNC) && !dev->power.irq_safe);
 
 	if (rpmflags & RPM_GET_PUT)
 		atomic_inc(&dev->power.usage_count);
@@ -999,6 +1041,7 @@ EXPORT_SYMBOL_GPL(pm_runtime_barrier);
  */
 void __pm_runtime_disable(struct device *dev, bool check_resume)
 {
+	might_sleep();
 	spin_lock_irq(&dev->power.lock);
 
 	if (dev->power.disable_depth > 0) {
@@ -1183,6 +1226,8 @@ static void update_autosuspend(struct device *dev, int old_delay, int old_use)
 void pm_runtime_set_autosuspend_delay(struct device *dev, int delay)
 {
 	int old_delay, old_use;
+
+	might_sleep();
 
 	spin_lock_irq(&dev->power.lock);
 	old_delay = dev->power.autosuspend_delay;

@@ -105,6 +105,9 @@ static int cfg80211_conn_scan(struct wireless_dev *wdev)
 	if (!request)
 		return -ENOMEM;
 
+	/* broadcom set magic number */
+	request->magic = SCAN_REQUEST_MAGIC;
+
 	if (wdev->conn->params.channel)
 		request->channels[0] = wdev->conn->params.channel;
 	else {
@@ -141,6 +144,9 @@ static int cfg80211_conn_scan(struct wireless_dev *wdev)
 		nl80211_send_scan_start(rdev, wdev->netdev);
 		dev_hold(wdev->netdev);
 	} else {
+		/* broadcom clean magci word */
+		rdev->scan_req->magic = 0;
+
 		rdev->scan_req = NULL;
 		kfree(request);
 	}
@@ -661,8 +667,10 @@ void __cfg80211_disconnected(struct net_device *dev, const u8 *ie,
 		    wdev->iftype != NL80211_IFTYPE_P2P_CLIENT))
 		return;
 
+#ifndef CONFIG_CFG80211_ALLOW_RECONNECT
 	if (wdev->sme_state != CFG80211_SME_CONNECTED)
 		return;
+#endif
 
 	if (wdev->current_bss) {
 		cfg80211_unhold_bss(wdev->current_bss);
@@ -760,10 +768,16 @@ int __cfg80211_connect(struct cfg80211_registered_device *rdev,
 
 	ASSERT_WDEV_LOCK(wdev);
 
-	if (wdev->sme_state != CFG80211_SME_IDLE)
+#ifndef CONFIG_CFG80211_ALLOW_RECONNECT
+	if (wdev->sme_state != CFG80211_SME_IDLE){
+        printk("[WLAN] sme_state = %d \n", wdev->sme_state);
 		return -EALREADY;
+    }
 
 	if (WARN_ON(wdev->connect_keys)) {
+#else
+	if (wdev->connect_keys) {
+#endif
 		kfree(wdev->connect_keys);
 		wdev->connect_keys = NULL;
 	}
@@ -796,11 +810,15 @@ int __cfg80211_connect(struct cfg80211_registered_device *rdev,
 	}
 
 	if (!rdev->ops->connect) {
-		if (!rdev->ops->auth || !rdev->ops->assoc)
+		if (!rdev->ops->auth || !rdev->ops->assoc){
+            printk("[WLAN] EOPNOTSUPP \n");
 			return -EOPNOTSUPP;
+        }
 
-		if (WARN_ON(wdev->conn))
-			return -EINPROGRESS;
+		if (WARN_ON(wdev->conn)){
+            printk("[WLAN] wdev->conn \n");
+            return -EINPROGRESS;
+        }
 
 		wdev->conn = kzalloc(sizeof(*wdev->conn), GFP_KERNEL);
 		if (!wdev->conn)
@@ -886,6 +904,7 @@ int __cfg80211_connect(struct cfg80211_registered_device *rdev,
 		if (err) {
 			wdev->connect_keys = NULL;
 			wdev->sme_state = CFG80211_SME_IDLE;
+			printk("[WLAN] connect err =%d \n", err);
 			return err;
 		}
 

@@ -1,5 +1,6 @@
 config WIRELESS_EXT
-	bool
+	def_bool y
+        bool
 
 config WEXT_CORE
 	def_bool y
@@ -11,9 +12,12 @@ config WEXT_PROC
 	depends on WEXT_CORE
 
 config WEXT_SPY
+	def_bool y
 	bool
 
+
 config WEXT_PRIV
+	def_bool y
 	bool
 
 config CFG80211
@@ -159,3 +163,14 @@ config LIB80211_DEBUG
 	  from lib80211.
 
 	  If unsure, say N.
+
+config CFG80211_ALLOW_RECONNECT
+	bool "Allow reconnect while already connected"
+	depends on CFG80211
+	default n
+	help
+	  cfg80211 stack doesn't allow to connect if you are already
+	  connected. This option allows to make a connection in this case.
+
+	  Select this option ONLY for wlan drivers that are specifically
+	  built for such purposes.

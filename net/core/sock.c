@@ -134,6 +134,10 @@
 #include <net/tcp.h>
 #endif
 
+#ifdef CONFIG_HTC_NETWORK_DEBUG
+#include <net/ip.h>
+#endif
+
 /*
  * Each address family might have different locking rules, so we have
  * one slock key per address family:
@@ -226,6 +230,56 @@ int net_cls_subsys_id = -1;
 EXPORT_SYMBOL_GPL(net_cls_subsys_id);
 #endif
 
+#ifdef CONFIG_HTC_NETWORK_DEBUG
+static int sock_set_timeout_direction(long *timeo_p, char __user *optval, int optlen, int direction)
+{
+	struct timeval tv;
+
+	if (optlen < sizeof(tv))
+		return -EINVAL;
+	if (copy_from_user(&tv, optval, sizeof(tv)))
+		return -EFAULT;
+	if (tv.tv_usec < 0 || tv.tv_usec >= USEC_PER_SEC)
+		return -EDOM;
+
+	if (tv.tv_sec < 0) {
+		static int warned __read_mostly;
+
+		*timeo_p = 0;
+		if (warned < 10 && net_ratelimit()) {
+			warned++;
+			printk(KERN_INFO "sock_set_timeout: `%s' (pid %d) "
+			       "tries to set negative timeout\n",
+				current->comm, task_pid_nr(current));
+		}
+		return 0;
+	}
+
+    /*
+    Remove it to avoid confusion by kernel team.
+    if (tv.tv_sec == 0 && tv.tv_usec == 0) { // direction: 0: rcv_settimeout, 1: snd_settimeout
+        NET_LOG("[SOCKET] `%s' (pid %d) %s sock_set_timeout: INFINITE", current->comm, task_pid_nr(current), direction == 0 ? "rcv" : "snd");
+	}
+	*/
+
+	/*
+	// only dump the INFINITE timeout
+	else {
+	    if (tv.tv_sec > 0)
+	        NET_LOG("[SOCKET] `%s' (pid %d) %s sock_set_timeout: %u sec", current->comm, task_pid_nr(current), direction == 0 ? "rcv" : "snd", tv.tv_sec);
+	    else if (tv.tv_sec == 0)
+	        NET_LOG("[SOCKET] `%s' (pid %d) %s sock_set_timeout: %u usec", current->comm, task_pid_nr(current), direction == 0 ? "rcv" : "snd", tv.tv_usec);
+	}
+	*/
+
+	*timeo_p = MAX_SCHEDULE_TIMEOUT;
+	if (tv.tv_sec == 0 && tv.tv_usec == 0)
+		return 0;
+	if (tv.tv_sec < (MAX_SCHEDULE_TIMEOUT/HZ - 1))
+		*timeo_p = tv.tv_sec*HZ + (tv.tv_usec+(1000000/HZ-1))/(1000000/HZ);
+	return 0;
+}
+#else
 static int sock_set_timeout(long *timeo_p, char __user *optval, int optlen)
 {
 	struct timeval tv;
@@ -256,6 +310,7 @@ static int sock_set_timeout(long *timeo_p, char __user *optval, int optlen)
 		*timeo_p = tv.tv_sec*HZ + (tv.tv_usec+(1000000/HZ-1))/(1000000/HZ);
 	return 0;
 }
+#endif
 
 static void sock_warn_obsolete_bsdism(const char *name)
 {
@@ -698,11 +753,19 @@ set_rcvbuf:
 		break;
 
 	case SO_RCVTIMEO:
+#ifdef CONFIG_HTC_NETWORK_DEBUG
+	    ret = sock_set_timeout_direction(&sk->sk_rcvtimeo, optval, optlen, 0);
+#else
 		ret = sock_set_timeout(&sk->sk_rcvtimeo, optval, optlen);
+#endif
 		break;
 
 	case SO_SNDTIMEO:
+#ifdef CONFIG_HTC_NETWORK_DEBUG
+        ret = sock_set_timeout_direction(&sk->sk_sndtimeo, optval, optlen, 1);
+#else
 		ret = sock_set_timeout(&sk->sk_sndtimeo, optval, optlen);
+#endif
 		break;
 
 	case SO_ATTACH_FILTER:

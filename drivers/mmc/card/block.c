@@ -136,11 +136,7 @@ static struct mmc_blk_data *mmc_blk_get(struct gendisk *disk)
 
 static inline int mmc_get_devidx(struct gendisk *disk)
 {
-	int devmaj = MAJOR(disk_devt(disk));
-	int devidx = MINOR(disk_devt(disk)) / perdev_minors;
-
-	if (!devmaj)
-		devidx = disk->first_minor / perdev_minors;
+	int devidx = disk->first_minor / perdev_minors;
 	return devidx;
 }
 
@@ -575,18 +571,22 @@ static int mmc_blk_cmd_error(struct request *req, const char *name, int error,
 			req->rq_disk->disk_name, "timed out", name, status);
 
 		/* If the status cmd initially failed, retry the r/w cmd */
-		if (!status_valid)
+		if (!status_valid) {
+			pr_err("%s: status not valid, retrying timeout\n", req->rq_disk->disk_name);
 			return ERR_RETRY;
-
+		}
 		/*
 		 * If it was a r/w cmd crc error, or illegal command
 		 * (eg, issued in wrong state) then retry - we should
 		 * have corrected the state problem above.
 		 */
-		if (status & (R1_COM_CRC_ERROR | R1_ILLEGAL_COMMAND))
+		if (status & (R1_COM_CRC_ERROR | R1_ILLEGAL_COMMAND)) {
+			pr_err("%s: command error, retrying timeout\n", req->rq_disk->disk_name);
 			return ERR_RETRY;
+		}
 
 		/* Otherwise abort the command */
+		pr_err("%s: not retrying timeout\n", req->rq_disk->disk_name);
 		return ERR_ABORT;
 
 	default:
@@ -701,7 +701,9 @@ static int mmc_blk_issue_discard_rq(struct mmc_queue *mq, struct request *req)
 	from = blk_rq_pos(req);
 	nr = blk_rq_sectors(req);
 
-	if (mmc_can_trim(card))
+	if (mmc_can_discard(card))
+		arg = MMC_DISCARD_ARG;
+	else if (mmc_can_trim(card))
 		arg = MMC_TRIM_ARG;
 	else
 		arg = MMC_ERASE_ARG;
@@ -741,10 +743,14 @@ static int mmc_blk_issue_secdiscard_rq(struct mmc_queue *mq,
 	from = blk_rq_pos(req);
 	nr = blk_rq_sectors(req);
 
+#ifndef DO_NOT_USE_ERASE_INSTEAD_OF_SECURE_ERASE_OR_SECURE_TRIM
+	arg = MMC_ERASE_ARG;
+#else
 	if (mmc_can_trim(card) && !mmc_erase_group_aligned(card, from, nr))
 		arg = MMC_SECURE_TRIM1_ARG;
 	else
 		arg = MMC_SECURE_ERASE_ARG;
+#endif
 
 	if (card->quirks & MMC_QUIRK_INAND_CMD38) {
 		err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
@@ -1059,6 +1065,7 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
 	struct mmc_queue_req *mq_rq;
 	struct request *req;
 	struct mmc_async_req *areq;
+	static unsigned int i = 0;
 
 	if (!rqc && !mq->mqrq_prev->req)
 		return 0;
@@ -1137,6 +1144,9 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
 		}
 	} while (ret);
 
+	if (brq->cmd.resp[0] & R1_URGENT_BKOPS)
+		mmc_card_set_need_bkops(card);
+
 	return 1;
 
  cmd_err:
@@ -1178,11 +1188,21 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
 	return 0;
 }
 
+static int
+mmc_blk_set_blksize(struct mmc_blk_data *md, struct mmc_card *card);
+
 static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 {
 	int ret;
 	struct mmc_blk_data *md = mq->data;
 	struct mmc_card *card = md->queue.card;
+
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	if (mmc_bus_needs_resume(card->host)) {
+		mmc_resume_bus(card->host);
+		mmc_blk_set_blksize(md, card);
+	}
+#endif
 
 	if (req && !mq->mqrq_prev->req)
 		/* claim host only for the first request */
@@ -1208,6 +1228,7 @@ static int mmc_blk_issue_rq(struct mmc_queue *mq, struct request *req)
 			mmc_blk_issue_rw_rq(mq, NULL);
 		ret = mmc_blk_issue_flush(mq, req);
 	} else {
+
 		ret = mmc_blk_issue_rw_rq(mq, req);
 	}
 
@@ -1288,6 +1309,7 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
 	md->disk->queue = md->queue.queue;
 	md->disk->driverfs_dev = parent;
 	set_disk_ro(md->disk, md->read_only || default_ro);
+	md->disk->flags = GENHD_FL_EXT_DEVT;
 
 	/*
 	 * As discussed on lkml, GENHD_FL_REMOVABLE should:
@@ -1387,7 +1409,7 @@ static int mmc_blk_alloc_parts(struct mmc_card *card, struct mmc_blk_data *md)
 	if (!mmc_card_mmc(card))
 		return 0;
 
-	if (card->ext_csd.boot_size) {
+	if (card->ext_csd.boot_size && mmc_boot_partition_access(card->host)) {
 		ret = mmc_blk_alloc_part(card, md, EXT_CSD_PART_CONFIG_ACC_BOOT0,
 					 card->ext_csd.boot_size >> 9,
 					 true,
@@ -1527,6 +1549,9 @@ static int mmc_blk_probe(struct mmc_card *card)
 	mmc_set_drvdata(card, md);
 	mmc_fixup_device(card, blk_fixups);
 
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	mmc_set_bus_resume_policy(card->host, 1);
+#endif
 	if (mmc_add_disk(md))
 		goto out;
 
@@ -1534,6 +1559,7 @@ static int mmc_blk_probe(struct mmc_card *card)
 		if (mmc_add_disk(part_md))
 			goto out;
 	}
+	card->mmcblk_dev = disk_to_dev(md->disk);
 	return 0;
 
  out:
@@ -1552,6 +1578,9 @@ static void mmc_blk_remove(struct mmc_card *card)
 	mmc_release_host(card->host);
 	mmc_blk_remove_req(md);
 	mmc_set_drvdata(card, NULL);
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	mmc_set_bus_resume_policy(card->host, 0);
+#endif
 }
 
 #ifdef CONFIG_PM
@@ -1575,7 +1604,9 @@ static int mmc_blk_resume(struct mmc_card *card)
 	struct mmc_blk_data *md = mmc_get_drvdata(card);
 
 	if (md) {
+#ifndef CONFIG_MMC_BLOCK_DEFERRED_RESUME
 		mmc_blk_set_blksize(md, card);
+#endif
 
 		/*
 		 * Resume involves the card going into idle state,

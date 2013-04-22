@@ -519,6 +519,9 @@ struct fuse_conn {
 
 	/** Read/write semaphore to hold when accessing sb. */
 	struct rw_semaphore killsb;
+
+	/** permission for setting the [am]time for this mount */
+	unsigned allow_utime;
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)

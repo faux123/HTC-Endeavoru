@@ -135,6 +135,7 @@ print_task(struct seq_file *m, struct rq *rq, struct task_struct *p)
 #endif
 
 	SEQ_printf(m, "\n");
+	show_stack(p, NULL);
 }
 
 static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
@@ -264,6 +265,9 @@ static void print_cpu(struct seq_file *m, int cpu)
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", #x, SPLIT_NS(rq->x))
 
 	P(nr_running);
+	SEQ_printf(m, "  .%-30s: %d.%03d   \n", "ave_nr_running",
+		   rq->ave_nr_running / FIXED_1,
+		   ((rq->ave_nr_running % FIXED_1) * 1000) / FIXED_1);
 	SEQ_printf(m, "  .%-30s: %lu\n", "load",
 		   rq->load.weight);
 	P(nr_switches);

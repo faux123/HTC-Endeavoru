@@ -483,6 +483,11 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, __be32 info)
 	struct ipcm_cookie ipc;
 	struct flowi4 fl4;
 	__be32 saddr;
+
+#ifdef CONFIG_HTC_NETWORK_DEBUG
+    __be32 src_addr, dst_addr;
+#endif
+
 	u8  tos;
 	struct net *net;
 	struct sock *sk;
@@ -560,6 +565,23 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, __be32 info)
 	/*
 	 *	Construct source address and options.
 	 */
+
+#ifdef CONFIG_HTC_NETWORK_DEBUG
+    src_addr = iph->saddr;
+	dst_addr = iph->daddr;
+
+    if ( (!ipv4_is_zeronet(src_addr) && !ipv4_is_loopback(src_addr)) &&
+         (!ipv4_is_zeronet(dst_addr) && !ipv4_is_loopback(dst_addr)))
+    {
+        	if ((type == ICMP_DEST_UNREACH) && ((code == ICMP_PORT_UNREACH) || (code == ICMP_HOST_UNREACH))) {
+        	    NET_LOG("[ICMP] Dest unreachable(%s): src:%pI4 dst: %pI4",
+        	           code == ICMP_PORT_UNREACH ? "PORT_UNREACH" : "HOST_UNREACH",
+        	           &src_addr,
+        	           &dst_addr
+        	           );
+            }
+    }
+#endif
 
 	saddr = iph->daddr;
 	if (!(rt->rt_flags & RTCF_LOCAL)) {

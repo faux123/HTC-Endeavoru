@@ -72,6 +72,17 @@ static struct kobj_attribute _name##_attr = {	\
 	.store	= _name##_store,		\
 }
 
+#define power_ro_attr(_name)	\
+static struct kobj_attribute _name##_attr = {	\
+	.attr»  = {				\
+		.name = __stringify(_name),	\
+		.mode = 0444,			\
+	},					\
+	.show»  = _name##_show,			\
+	.store» = NULL,				\
+}
+
+
 /* Preferred image size in bytes (default 500 MB) */
 extern unsigned long image_size;
 /* Size of memory reserved for drivers (default SPARE_PAGES x PAGE_SIZE) */
@@ -244,4 +255,32 @@ static inline int suspend_freeze_processes(void)
 static inline void suspend_thaw_processes(void)
 {
 }
+#endif
+
+#ifdef CONFIG_WAKELOCK
+/* kernel/power/wakelock.c */
+extern struct workqueue_struct *suspend_work_queue;
+extern struct wake_lock main_wake_lock;
+extern suspend_state_t requested_suspend_state;
+#endif
+
+#ifdef CONFIG_USER_WAKELOCK
+ssize_t wake_lock_show(struct kobject *kobj, struct kobj_attribute *attr,
+			char *buf);
+ssize_t wake_lock_store(struct kobject *kobj, struct kobj_attribute *attr,
+			const char *buf, size_t n);
+ssize_t wake_unlock_show(struct kobject *kobj, struct kobj_attribute *attr,
+			char *buf);
+ssize_t  wake_unlock_store(struct kobject *kobj, struct kobj_attribute *attr,
+			const char *buf, size_t n);
+#endif
+
+#ifdef CONFIG_EARLYSUSPEND
+/* kernel/power/earlysuspend.c */
+void request_suspend_state(suspend_state_t state);
+suspend_state_t get_suspend_state(void);
+#ifdef CONFIG_HTC_ONMODE_CHARGING
+void request_onchg_state(int on);
+int get_onchg_state(void);
+#endif
 #endif

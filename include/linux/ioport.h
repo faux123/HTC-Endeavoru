@@ -168,7 +168,10 @@ int adjust_resource(struct resource *res, resource_size_t start,
 resource_size_t resource_alignment(struct resource *res);
 static inline resource_size_t resource_size(const struct resource *res)
 {
-	return res->end - res->start + 1;
+	if (res)
+		return res->end - res->start + 1;
+	else
+		return 0;
 }
 static inline unsigned long resource_type(const struct resource *res)
 {

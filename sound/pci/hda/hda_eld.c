@@ -28,6 +28,8 @@
 #include "hda_codec.h"
 #include "hda_local.h"
 
+static bool bNeedLog = false;
+
 enum eld_versions {
 	ELD_VER_CEA_861D	= 2,
 	ELD_VER_PARTIAL		= 31,
@@ -151,10 +153,27 @@ static unsigned int hdmi_get_eld_data(struct hda_codec *codec, hda_nid_t nid,
 
 	val = snd_hda_codec_read(codec, nid, 0,
 					AC_VERB_GET_HDMI_ELDD, byte_index);
-#ifdef BE_PARANOID
-	printk(KERN_INFO "HDMI: ELD data byte %d: 0x%x\n", byte_index, val);
+#if 1//def BE_PARANOID
+	if(bNeedLog)
+		printk(KERN_INFO "HDMI: ELD data byte %d: 0x%x\n", byte_index, val);
 #endif
 	return val;
+}
+
+static unsigned char hdmi_get_eld_byte(struct hda_codec *codec, hda_nid_t nid,
+					int byte_index)
+{
+	unsigned int val;
+
+	val = hdmi_get_eld_data(codec, nid, byte_index);
+
+	if ((val & AC_ELDD_ELD_VALID) == 0) {
+		snd_printd(KERN_INFO "HDMI: invalid ELD data byte %d\n",
+								byte_index);
+		val = 0;
+	}
+
+	return val & AC_ELDD_ELD_DATA;
 }
 
 #define GRAB_BITS(buf, byte, lowbit, bits) 		\
@@ -304,6 +323,81 @@ out_fail:
 	return -EINVAL;
 }
 
+#define GET_BITS(val, lowbit, bits) 			\
+({							\
+	BUILD_BUG_ON(lowbit > 7);			\
+	BUILD_BUG_ON(bits > 8);				\
+	BUILD_BUG_ON(bits <= 0);			\
+							\
+	(val >> (lowbit)) & ((1 << (bits)) - 1);	\
+})
+
+/* update ELD information relevant for getting PCM info */
+static int hdmi_update_lpcm_sad_eld (struct hda_codec *codec, hda_nid_t nid,
+				     struct hdmi_eld *e, int size)
+{
+	int i, j;
+	u32 val, sad_base;
+	struct cea_sad *a;
+	printk(KERN_INFO "ENTERING hdmi_update_lpcm_sad_eld()");
+	bNeedLog = true;
+	val = hdmi_get_eld_byte(codec, nid, 0);
+	e->eld_ver = GET_BITS(val, 3, 5);
+	if (e->eld_ver != ELD_VER_CEA_861D &&
+	    e->eld_ver != ELD_VER_PARTIAL) {
+		snd_printd(KERN_INFO "HDMI: Unknown ELD version %d\n",
+								e->eld_ver);
+		goto out_fail;
+	}
+
+	val = hdmi_get_eld_byte(codec, nid, 4);
+	sad_base = GET_BITS(val, 0, 5);
+	sad_base += ELD_FIXED_BYTES;
+
+	val = hdmi_get_eld_byte(codec, nid, 5);
+	e->sad_count = GET_BITS(val, 4, 4);
+
+	for (i = 0; i < e->sad_count; i++, sad_base += 3) {
+		if ((sad_base + 3) > size) {
+			snd_printd(KERN_INFO "HDMI: out of range SAD %d\n", i);
+			goto out_fail;
+		}
+		a = &e->sad[i];
+
+		val = hdmi_get_eld_byte(codec, nid, sad_base);
+		a->format = GET_BITS(val, 3, 4);
+		a->channels = GET_BITS(val, 0, 3);
+		a->channels++;
+
+		a->rates = 0;
+		a->sample_bits = 0;
+		a->max_bitrate = 0;
+
+		if (a->format != AUDIO_CODING_TYPE_LPCM)
+			continue;
+
+		val = hdmi_get_eld_byte(codec, nid, sad_base + 1);
+		val = GET_BITS(val, 0, 7);
+		for (j = 0; j < 7; j++)
+			if (val & (1 << j))
+				a->rates |= cea_sampling_frequencies[j + 1];
+
+		val = hdmi_get_eld_byte(codec, nid, sad_base + 2);
+		val = GET_BITS(val, 0, 3);
+		for (j = 0; j < 3; j++)
+			if (val & (1 << j))
+				a->sample_bits |= cea_sample_sizes[j + 1];
+	}
+	bNeedLog = false;
+	e->lpcm_sad_ready = 1;
+	printk(KERN_INFO "Leaving: hdmi_update_lpcm_sad_eld(), set e->lpcm_sad_ready = 1");
+	return 0;
+
+out_fail:
+	e->eld_ver = 0;
+	return -EINVAL;
+}
+
 int snd_hdmi_get_eld_size(struct hda_codec *codec, hda_nid_t nid)
 {
 	return snd_hda_codec_read(codec, nid, 0, AC_VERB_GET_HDMI_DIP_SIZE,
@@ -317,7 +411,7 @@ int snd_hdmi_get_eld(struct hdmi_eld *eld,
 	int ret;
 	int size;
 	unsigned char *buf;
-
+	printk(KERN_INFO "ENTERING snd_hdmi_get_eld()");
 	size = snd_hdmi_get_eld_size(codec, nid);
 	if (size == 0) {
 		/* wfg: workaround for ASUS P5E-VM HDMI board */
@@ -327,6 +421,18 @@ int snd_hdmi_get_eld(struct hdmi_eld *eld,
 	if (size < ELD_FIXED_BYTES || size > PAGE_SIZE) {
 		snd_printd(KERN_INFO "HDMI: invalid ELD buf size %d\n", size);
 		return -ERANGE;
+	}
+
+	if (!eld->lpcm_sad_ready)
+		hdmi_update_lpcm_sad_eld(codec, nid, eld, size);
+
+	codec->recv_dec_cap = 0;
+	for (i = 0; i < eld->sad_count; i++) {
+		if (eld->sad[i].format == AUDIO_CODING_TYPE_AC3) {
+			codec->recv_dec_cap |= (1 << AUDIO_CODING_TYPE_AC3);
+		} else if (eld->sad[i].format == AUDIO_CODING_TYPE_DTS) {
+			codec->recv_dec_cap |= (1 << AUDIO_CODING_TYPE_DTS);
+		}
 	}
 
 	buf = kmalloc(size, GFP_KERNEL);
@@ -603,10 +709,11 @@ void snd_hdmi_eld_update_pcm_info(struct hdmi_eld *eld,
 	channels_max = 2;
 	for (i = 0; i < eld->sad_count; i++) {
 		struct cea_sad *a = &eld->sad[i];
+
 		rates |= a->rates;
-		if (a->channels > channels_max)
-			channels_max = a->channels;
 		if (a->format == AUDIO_CODING_TYPE_LPCM) {
+			if (a->channels > channels_max)
+				channels_max = a->channels;
 			if (a->sample_bits & AC_SUPPCM_BITS_20) {
 				formats |= SNDRV_PCM_FMTBIT_S32_LE;
 				if (maxbps < 20)

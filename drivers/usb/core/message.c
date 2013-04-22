@@ -1,6 +1,7 @@
 /*
  * message.c - synchronous message handling
  */
+#define DEBUG
 
 #include <linux/pci.h>	/* for scatterlist macros */
 #include <linux/usb.h>
@@ -51,15 +52,17 @@ static int usb_start_wait_urb(struct urb *urb, int timeout, int *actual_length)
 	urb->context = &ctx;
 	urb->actual_length = 0;
 	retval = usb_submit_urb(urb, GFP_NOIO);
-	if (unlikely(retval))
+	if (unlikely(retval)) {
+		pr_info("%s usb_submit_urb failed retval = %d\n",__func__, retval);
 		goto out;
+	}
 
 	expire = timeout ? msecs_to_jiffies(timeout) : MAX_SCHEDULE_TIMEOUT;
 	if (!wait_for_completion_timeout(&ctx.done, expire)) {
 		usb_kill_urb(urb);
 		retval = (ctx.status == -ENOENT ? -ETIMEDOUT : ctx.status);
 
-		dev_dbg(&urb->dev->dev,
+		dev_err(&urb->dev->dev,
 			"%s timed out on ep%d%s len=%u/%u\n",
 			current->comm,
 			usb_endpoint_num(&urb->ep->desc),

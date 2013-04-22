@@ -74,6 +74,10 @@ const struct spi_device_id *spi_get_device_id(const struct spi_device *sdev)
 {
 	const struct spi_driver *sdrv = to_spi_driver(sdev->dev.driver);
 
+	if (!sdrv) {
+		pr_err("[SPI] %s: sdrv is NULL\n", __func__);
+		return NULL;
+	}
 	return spi_match_id(sdrv->id_table, sdev);
 }
 EXPORT_SYMBOL_GPL(spi_get_device_id);
@@ -87,6 +91,10 @@ static int spi_match_device(struct device *dev, struct device_driver *drv)
 	if (of_driver_match_device(dev, drv))
 		return 1;
 
+	if (!sdrv) {
+		pr_err("[SPI] %s: sdrv is NULL\n", __func__);
+		return -1;
+	}
 	if (sdrv->id_table)
 		return !!spi_match_id(sdrv->id_table, spi);
 
@@ -228,6 +236,10 @@ static int spi_drv_probe(struct device *dev)
 {
 	const struct spi_driver		*sdrv = to_spi_driver(dev->driver);
 
+	if (!sdrv) {
+		pr_err("[SPI] %s: sdrv is NULL\n", __func__);
+		return -1;
+	}
 	return sdrv->probe(to_spi_device(dev));
 }
 
@@ -235,6 +247,10 @@ static int spi_drv_remove(struct device *dev)
 {
 	const struct spi_driver		*sdrv = to_spi_driver(dev->driver);
 
+	if (!sdrv) {
+		pr_err("[SPI] %s: sdrv is NULL\n", __func__);
+		return -1;
+	}
 	return sdrv->remove(to_spi_device(dev));
 }
 
@@ -242,8 +258,22 @@ static void spi_drv_shutdown(struct device *dev)
 {
 	const struct spi_driver		*sdrv = to_spi_driver(dev->driver);
 
+	if (!sdrv) {
+		pr_err("[SPI] %s: sdrv is NULL\n", __func__);
+		return;
+	}
 	sdrv->shutdown(to_spi_device(dev));
 }
+
+int spi_clock_control(struct spi_device *spi, int c_enable)
+{
+	struct spi_master *master = spi->master;
+	if (master->clock_control == NULL)
+		return -ENOSYS;
+	else
+		return master->clock_control(spi, c_enable);
+}
+EXPORT_SYMBOL_GPL(spi_clock_control);
 
 /**
  * spi_register_driver - register a SPI driver
@@ -1100,6 +1130,76 @@ int spi_write_then_read(struct spi_device *spi,
 	return status;
 }
 EXPORT_SYMBOL_GPL(spi_write_then_read);
+
+/**
+ * spi_write_and_read - SPI synchronous write and read in full duplex
+ * @spi: device with which data will be exchanged
+ * @txbuf: data to be written (need not be dma-safe)
+ * @rxbuf: buffer into which data will be read (need not be dma-safe)
+ * @size: size of transmission, in bytes
+ * Context: can sleep
+ * (Modify from spi_write_then_read)
+ *
+ * This performs a full duplex MicroWire style transaction with the
+ * device, sending txbuf and reading rxbuf at same time. The return value
+ * is zero for success, else a negative errno status code.
+ * This call may only be used from a context that may sleep.
+ *
+ * Parameters to this routine are always copied using a small buffer;
+ * portable code should never use this for more than 32 bytes.
+ * Performance-sensitive or bulk transfer code should instead use
+ * spi_{async,sync}() calls with dma-safe buffers.
+ */
+int spi_write_and_read(struct spi_device *spi,
+		u8 *txbuf, u8 *rxbuf, unsigned size)
+{
+	static DEFINE_MUTEX(lock);
+
+	int			status;
+	struct spi_message	message;
+	struct spi_transfer	x;
+	u8			*local_buf;
+
+	/* Use preallocated DMA-safe buffer.  We can't avoid copying here,
+	 * (as a pure convenience thing), but we can keep heap costs
+	 * out of the hot path ...
+	 */
+	if (size > SPI_BUFSIZ)
+		return -EINVAL;
+
+	spi_message_init(&message);
+	memset(&x, 0, sizeof x);
+	if (size) {
+		x.len = size;
+		spi_message_add_tail(&x, &message);
+	}
+
+	/* ... unless someone else is using the pre-allocated buffer */
+	if (!mutex_trylock(&lock)) {
+		local_buf = kmalloc(SPI_BUFSIZ, GFP_KERNEL);
+		if (!local_buf)
+			return -ENOMEM;
+	} else
+		local_buf = buf;
+
+	memcpy(local_buf, txbuf, size);
+	x.tx_buf = local_buf;
+	x.rx_buf = local_buf + size;
+
+
+	/* do the i/o */
+	status = spi_sync(spi, &message);
+	if (status == 0)
+		memcpy(rxbuf, x.rx_buf, size);
+
+	if (x.tx_buf == buf)
+		mutex_unlock(&lock);
+	else
+		kfree(local_buf);
+
+	return status;
+}
+EXPORT_SYMBOL_GPL(spi_write_and_read);
 
 /*-------------------------------------------------------------------------*/
 

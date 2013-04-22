@@ -153,6 +153,9 @@ struct kmem_cache *vm_area_cachep;
 /* SLAB cache for mm_struct structures (tsk->mm) */
 static struct kmem_cache *mm_cachep;
 
+/* Notifier list called when a task struct is freed */
+static ATOMIC_NOTIFIER_HEAD(task_free_notifier);
+
 static void account_kernel_stack(struct thread_info *ti, int account)
 {
 	struct zone *zone = page_zone(virt_to_page(ti));
@@ -184,6 +187,18 @@ static inline void put_signal_struct(struct signal_struct *sig)
 		free_signal_struct(sig);
 }
 
+int task_free_register(struct notifier_block *n)
+{
+	return atomic_notifier_chain_register(&task_free_notifier, n);
+}
+EXPORT_SYMBOL(task_free_register);
+
+int task_free_unregister(struct notifier_block *n)
+{
+	return atomic_notifier_chain_unregister(&task_free_notifier, n);
+}
+EXPORT_SYMBOL(task_free_unregister);
+
 void __put_task_struct(struct task_struct *tsk)
 {
 	WARN_ON(!tsk->exit_state);
@@ -194,6 +209,7 @@ void __put_task_struct(struct task_struct *tsk)
 	delayacct_tsk_free(tsk);
 	put_signal_struct(tsk->signal);
 
+	atomic_notifier_call_chain(&task_free_notifier, 0, tsk);
 	if (!profile_handoff_task(tsk))
 		free_task(tsk);
 }
@@ -1098,6 +1114,11 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 
 	ftrace_graph_init_task(p);
 
+#if defined(CONFIG_BEST_TRADE_HOTPLUG)
+    /* always clean up bthp info first for new task */
+    memset(&p->bthp_tskinfo, 0, sizeof(p->bthp_tskinfo));
+#endif
+
 	rt_mutex_init_task(p);
 
 #ifdef CONFIG_PROVE_LOCKING
@@ -1207,7 +1228,10 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 #endif
 
 #ifdef CONFIG_DEBUG_MUTEXES
-	p->blocked_on = NULL; /* not blocked yet */
+	/* not blocked yet */
+	p->blocked_on = NULL;
+	p->blocked_by = NULL;
+	p->blocked_since = 0;
 #endif
 #ifdef CONFIG_CGROUP_MEM_RES_CTLR
 	p->memcg_batch.do_batch = 0;
@@ -1462,6 +1486,21 @@ struct task_struct * __cpuinit fork_idle(int cpu)
 	return task;
 }
 
+/* Notifier list called when a task struct is freed */
+static ATOMIC_NOTIFIER_HEAD(task_fork_notifier);
+
+int task_fork_register(struct notifier_block *n)
+{
+	return atomic_notifier_chain_register(&task_fork_notifier, n);
+}
+EXPORT_SYMBOL(task_fork_register);
+
+int task_fork_unregister(struct notifier_block *n)
+{
+	return atomic_notifier_chain_unregister(&task_fork_notifier, n);
+}
+EXPORT_SYMBOL(task_fork_unregister);
+
 /*
  *  Ok, this is the main fork-routine.
  *
@@ -1514,6 +1553,7 @@ long do_fork(unsigned long clone_flags,
 
 	p = copy_process(clone_flags, stack_start, regs, stack_size,
 			 child_tidptr, NULL, trace);
+
 	/*
 	 * Do this prior waking up the new thread - the thread pointer
 	 * might get invalid after that point, if the thread exits quickly.
@@ -1522,6 +1562,7 @@ long do_fork(unsigned long clone_flags,
 		struct completion vfork;
 
 		trace_sched_process_fork(current, p);
+		atomic_notifier_call_chain(&task_fork_notifier, 0, p);
 
 		nr = task_pid_vnr(p);
 

@@ -21,6 +21,8 @@
 #include <linux/tick.h>
 #include <linux/stop_machine.h>
 
+#include "tick-internal.h"
+
 /* Structure holding internal timekeeping values. */
 struct timekeeper {
 	/* Current clocksource used for timekeeping. */
@@ -1112,7 +1114,7 @@ struct timespec get_monotonic_coarse(void)
  */
 void do_timer(unsigned long ticks)
 {
-	jiffies_64 += ticks;
+	jiffies_64 += jiffies_per_tick * ticks;
 	update_wall_time();
 	calc_global_load(ticks);
 }

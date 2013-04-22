@@ -1531,7 +1531,22 @@ static int snd_rawmidi_dev_register(struct snd_device *device)
 	int err;
 	struct snd_info_entry *entry;
 	char name[16];
+
+	if(device == NULL) {
+		snd_printk(KERN_ERR "snd_rawmidi_dev_register: device = NULL\n");
+		return -EINVAL;
+	}
+
 	struct snd_rawmidi *rmidi = device->device_data;
+
+	if(rmidi == NULL) {
+		snd_printk(KERN_ERR "snd_rawmidi_dev_register: rmidi = NULL\n");
+		return -EINVAL;
+	}
+	if(rmidi->card == NULL) {
+		snd_printk(KERN_ERR "snd_rawmidi_dev_register: rmidi->card = NULL\n");
+		return -EINVAL;
+	}
 
 	if (rmidi->device >= SNDRV_RAWMIDI_DEVICES)
 		return -ENOMEM;
@@ -1541,6 +1556,25 @@ static int snd_rawmidi_dev_register(struct snd_device *device)
 		return -EBUSY;
 	}
 	list_add_tail(&rmidi->list, &snd_rawmidi_devices);
+	/* Fix klocwork Issue - Start */
+	if(rmidi->card->number < 0) {
+		snd_printk(KERN_ERR "snd_rawmidi_dev_register: rmidi->card->number(%i) < 0\n", rmidi->card->number);
+		rmidi->card->number = -(rmidi->card->number);
+	}
+	else if(rmidi->card->number > 9999) {
+		snd_printk(KERN_ERR "snd_rawmidi_dev_register: rmidi->card->number(%i) > 9999\n", rmidi->card->number);
+	}
+	rmidi->card->number = rmidi->card->number % 10000;
+
+	if(rmidi->device < 0) {
+		snd_printk(KERN_ERR "snd_rawmidi_dev_register: rmidi->device(%i) < 0\n", rmidi->device);
+		rmidi->device = -(rmidi->device);
+	}
+	else if(rmidi->device > 9999) {
+		snd_printk(KERN_ERR "snd_rawmidi_dev_register: rmidi->device(%i) > 9999\n", rmidi->device);
+	}
+	rmidi->device = rmidi->device % 10000;
+	/* Fix klocwork Issue - End */
 	sprintf(name, "midiC%iD%i", rmidi->card->number, rmidi->device);
 	if ((err = snd_register_device(SNDRV_DEVICE_TYPE_RAWMIDI,
 				       rmidi->card, rmidi->device,
